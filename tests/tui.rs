@@ -256,6 +256,57 @@ fn worker_updates_request_a_redraw_when_a_scan_finishes_or_fails() {
 }
 
 #[test]
+fn clipboard_completion_updates_feedback_while_navigation_stays_available() {
+    let (dir, mut app) = fixture();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.copying = Some(receiver);
+    app.status = "Clipboard: copying selected path…".into();
+    assert!(!app.poll_workers());
+    let previous = app.browser.as_ref().unwrap().selected;
+    key(&mut app, KeyCode::Down);
+    assert_ne!(app.browser.as_ref().unwrap().selected, previous);
+    sender.send(Ok(dir.path().join("notes.txt"))).unwrap();
+    assert!(app.poll_workers());
+    assert!(app.copying.is_none());
+    let screen = render(&mut app, 120, 42);
+    assert!(screen.contains("Clipboard: copied"));
+    assert!(screen.contains("notes.txt"));
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.copying = Some(receiver);
+    sender
+        .send(Err("No desktop clipboard session is available".into()))
+        .unwrap();
+    assert!(app.poll_workers());
+    assert!(app.copying.is_none());
+    assert!(render(&mut app, 60, 20).contains("Clipboard unavailable:"));
+    assert!(!app.poll_workers());
+}
+
+#[test]
+fn copying_requires_a_selection_and_does_not_interfere_with_search_or_modals() {
+    let (_dir, mut app) = fixture();
+    let mut repeat = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(app.copying.is_none());
+    app.browser.as_mut().unwrap().filter("no-match".into());
+    key(&mut app, KeyCode::Char('c'));
+    assert!(app.copying.is_none());
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('/'));
+    key(&mut app, KeyCode::Char('c'));
+    assert_eq!(app.browser.as_ref().unwrap().query, "c");
+    assert!(app.copying.is_none());
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('?'));
+    key(&mut app, KeyCode::Char('c'));
+    assert!(app.copying.is_none());
+    app.modal_scroll = 10;
+    assert!(render(&mut app, 120, 60).contains("Copy selected path to clipboard"));
+}
+
+#[test]
 fn visibility_keys_reflow_the_map_and_survive_rescan_with_new_node_ids() {
     let (dir, mut app) = fixture();
     key(&mut app, KeyCode::Down);

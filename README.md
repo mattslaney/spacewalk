@@ -44,6 +44,7 @@ spacewalk --help
 | Esc | Clear the filter, cancel deletion, or close a dialog |
 | n / N | Next / previous matching name in the current scope |
 | s | Cycle sort: largest, name, file count, smallest |
+| c | Copy the selected item's full path to the system clipboard |
 | r | Rescan the original directory and preserve the current view where possible |
 | v | Hide / show the selected file or directory in the treemap |
 | V | Show all hidden items again |
@@ -53,6 +54,8 @@ spacewalk --help
 | q / Ctrl+C | Quit; a deletion already in progress finishes first |
 
 Click either panel to focus it and select an item. In the tree, click a directory's triangle to expand or collapse it. A map click expands the selected file's ancestors and scrolls it into view in the tree. Double-click a block to zoom into its parent directory; right-click the map to zoom out. The wheel over the tree moves its selection. Arrow keys and PageUp/PageDown scroll dialogs.
+
+Press `c` in either panel to copy the selected item's absolute path, including spaces and Unicode characters, without quotes or a trailing newline. Clipboard copying runs in the background and reports success or unavailability below the selection details. Linux needs `wl-copy` from `wl-clipboard` for Wayland, or `xclip`/`xsel` for X11, with access to the desktop session. macOS uses `pbcopy`; Windows uses PowerShell's `Set-Clipboard`. Clipboard support is optional; navigation continues normally when no clipboard is available.
 
 A selected directory lights up all its file blocks and gets a white outline around its region. Colors are assigned by extension. Small files may have no visible block at terminal resolution; zoom into their parent directory to see more detail. Zero-byte files and empty directories are accessible in the tree.
 
