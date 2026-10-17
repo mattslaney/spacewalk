@@ -1,5 +1,6 @@
+#[cfg(unix)]
+use std::collections::HashSet;
 use std::{
-    collections::HashSet,
     ffi::OsString,
     fs::{self, Metadata},
     io,
@@ -80,6 +81,18 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn find_path(&self, path: &Path) -> Option<NodeId> {
+        let relative = path.strip_prefix(&self.root).ok()?;
+        let mut id = 0;
+        for part in relative.components() {
+            id = *self.nodes[id]
+                .children
+                .iter()
+                .find(|&&child| self.nodes[child].name == part.as_os_str())?;
+        }
+        Some(id)
+    }
+
     pub fn path(&self, id: NodeId) -> PathBuf {
         let mut parts = Vec::new();
         let mut current = id;

@@ -2,6 +2,7 @@
 name = "spacewalk"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Explore disk usage with a linked terminal file tree and treemap"
 license = "MIT"
 

@@ -133,6 +133,13 @@ impl Browser {
 
     pub fn filter(&mut self, query: String) {
         self.query = query;
+        if self.query.is_empty() {
+            let mut current = self.selected;
+            while let Some(parent) = self.data.nodes[current].parent {
+                self.expanded.insert(parent);
+                current = parent;
+            }
+        }
         self.matches.clear();
         self.included.fill(self.query.is_empty());
         if !self.query.is_empty() {
@@ -165,7 +172,7 @@ impl Browser {
         let matches: Vec<_> = self
             .rows
             .iter()
-            .filter(|r| self.matches.contains(&r.id))
+            .filter(|r| self.matches.binary_search(&r.id).is_ok())
             .map(|r| r.id)
             .collect();
         if matches.is_empty() {
@@ -219,18 +226,22 @@ impl Browser {
         }
         if self.expanded.insert(self.selected) {
             self.rebuild_rows();
-        } else {
-            self.move_tree(1);
+        } else if let Some(row) = self
+            .rows
+            .iter()
+            .find(|row| self.data.nodes[row.id].parent == Some(self.selected))
+        {
+            self.selected = row.id;
         }
     }
 
     pub fn collapse(&mut self) {
         if self.expanded.remove(&self.selected) {
             self.rebuild_rows();
-        } else if self.selected != self.scope {
-            if let Some(parent) = self.data.nodes[self.selected].parent {
-                self.selected = parent;
-            }
+        } else if self.selected != self.scope
+            && let Some(parent) = self.data.nodes[self.selected].parent
+        {
+            self.selected = parent;
         }
     }
 
