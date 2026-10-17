@@ -220,9 +220,39 @@ fn quit_finishes_a_deletion_already_in_progress() {
     key(&mut app, KeyCode::Char('q'));
     assert!(!app.quitting);
     sender.send(Ok(())).unwrap();
-    app.poll_workers();
+    assert!(app.poll_workers());
     assert!(app.quitting);
     assert!(app.scanning.is_none());
+}
+
+#[test]
+fn worker_updates_request_a_redraw_when_a_scan_finishes_or_fails() {
+    let (_dir, mut app) = fixture();
+    assert!(!app.poll_workers());
+    app.rescan();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.scanning.is_some() {
+        assert!(Instant::now() < deadline);
+        let changed = app.poll_workers();
+        if app.scanning.is_none() {
+            assert!(changed, "scan completion must update the screen");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!app.poll_workers());
+
+    app.root.push("missing");
+    app.rescan();
+    while app.scanning.is_some() {
+        assert!(Instant::now() < deadline);
+        let changed = app.poll_workers();
+        if app.scanning.is_none() {
+            assert!(changed, "scan failure must update the screen");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(app.status.starts_with("Scan failed"));
+    assert!(!app.poll_workers());
 }
 
 #[test]
