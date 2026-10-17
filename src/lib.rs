@@ -2,6 +2,7 @@ pub mod app;
 pub mod browser;
 pub mod clipboard;
 pub mod delete;
+pub mod git;
 pub mod scan;
 pub mod treemap;
 pub mod ui;

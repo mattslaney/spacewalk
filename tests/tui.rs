@@ -3,6 +3,7 @@ use ratatui::{Terminal, backend::TestBackend};
 use spacewalk::{
     app::{App, Modal},
     browser::Panel,
+    git::{RepoState, RepoStatus},
     scan::Options,
     ui,
 };
@@ -304,6 +305,132 @@ fn copying_requires_a_selection_and_does_not_interfere_with_search_or_modals() {
     assert!(app.copying.is_none());
     app.modal_scroll = 10;
     assert!(render(&mut app, 120, 60).contains("Copy selected path to clipboard"));
+}
+
+#[test]
+fn git_icons_and_colors_distinguish_sync_changes_and_missing_remotes() {
+    let (_dir, mut app) = fixture();
+    let repo = app.browser.as_ref().unwrap().selected;
+    for (state, icons, detail, color) in [
+        (
+            RepoState::Checking,
+            "⎇ …",
+            "checking repository",
+            ratatui::style::Color::Rgb(133, 151, 174),
+        ),
+        (
+            RepoState::Ready(RepoStatus {
+                branches: 1,
+                has_remote: true,
+                fetched: true,
+                ..RepoStatus::default()
+            }),
+            "⎇ ✓",
+            "every local branch matches",
+            ratatui::style::Color::Rgb(107, 226, 188),
+        ),
+        (
+            RepoState::Ready(RepoStatus::default()),
+            "⎇ ∅",
+            "no configured remote",
+            ratatui::style::Color::Rgb(180, 155, 225),
+        ),
+        (
+            RepoState::Ready(RepoStatus {
+                dirty: true,
+                ahead: 1,
+                behind: 1,
+                branches: 1,
+                has_remote: true,
+                fetched: true,
+                ..RepoStatus::default()
+            }),
+            "⎇ *↑↓",
+            "working tree changes",
+            ratatui::style::Color::Rgb(250, 188, 111),
+        ),
+        (
+            RepoState::Unavailable("Git missing".into()),
+            "⎇ ?",
+            "status unavailable",
+            ratatui::style::Color::Rgb(250, 188, 111),
+        ),
+    ] {
+        app.browser
+            .as_mut()
+            .unwrap()
+            .repositories
+            .insert(repo, state);
+        for (width, height) in [(60, 20), (120, 42)] {
+            let screen = render(&mut app, width, height);
+            assert!(
+                screen.contains(icons),
+                "missing {icons} at {width}x{height}"
+            );
+            assert!(screen.contains(detail));
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let &(y, _, twisty) = app.hits.rows.iter().find(|(_, id, _)| *id == repo).unwrap();
+            let cell = &terminal.backend().buffer()[(twisty + 2, y)];
+            assert_eq!(cell.symbol(), "⎇");
+            assert_eq!(cell.fg, color);
+        }
+    }
+}
+
+#[test]
+fn background_git_checks_refresh_after_rescans_and_drop_removed_repositories() {
+    fn wait_git(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.git.is_some() {
+            assert!(Instant::now() < deadline, "Git worker stalled");
+            app.poll_workers();
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    let (dir, mut app) = fixture();
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let output = Command::new("git").arg("init").arg(&repo).output().unwrap();
+    assert!(output.status.success());
+    key(&mut app, KeyCode::Char('r'));
+    wait(&mut app);
+    let id = app.browser.as_ref().unwrap().data.find_path(&repo).unwrap();
+    assert!(app.browser.as_ref().unwrap().repositories.contains_key(&id));
+    // Tree input is available while the separate Git worker runs.
+    key(&mut app, KeyCode::Down);
+    wait_git(&mut app);
+    let RepoState::Ready(status) = &app.browser.as_ref().unwrap().repositories[&id] else {
+        panic!("Git check did not complete")
+    };
+    assert!(!status.has_remote);
+    assert!(!app.poll_workers());
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/unreachable.git",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    key(&mut app, KeyCode::Char('r'));
+    wait(&mut app);
+    wait_git(&mut app);
+    let id = app.browser.as_ref().unwrap().data.find_path(&repo).unwrap();
+    let RepoState::Ready(status) = &app.browser.as_ref().unwrap().repositories[&id] else {
+        panic!("Git recheck did not complete")
+    };
+    assert!(status.has_remote);
+    assert!(!status.fetched);
+    fs::remove_dir_all(repo.join(".git")).unwrap();
+    key(&mut app, KeyCode::Char('r'));
+    wait(&mut app);
+    assert!(app.git.is_none());
+    assert!(app.browser.as_ref().unwrap().repositories.is_empty());
 }
 
 #[test]

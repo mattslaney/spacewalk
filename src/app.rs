@@ -3,6 +3,7 @@ use crate::{
     clipboard,
     delete::DeleteRequest,
     display_name,
+    git::{GitTask, RepoState},
     scan::{Options, Progress, ScanEvent, ScanTask, Snapshot},
     treemap::Direction,
 };
@@ -118,6 +119,7 @@ pub struct App {
     pub hits: HitAreas,
     pub deleting: Option<Receiver<Result<(), String>>>,
     pub copying: Option<Receiver<Result<PathBuf, String>>>,
+    pub git: Option<GitTask>,
     exit_after_delete: bool,
     last_click: Option<(usize, Instant)>,
 }
@@ -140,6 +142,7 @@ impl App {
             hits: HitAreas::default(),
             deleting: None,
             copying: None,
+            git: None,
             exit_after_delete: false,
             last_click: None,
         }
@@ -152,6 +155,7 @@ impl App {
         if !self.status.starts_with("Deletion") {
             self.status = "Scanning directory…".into();
         }
+        self.git = None;
         self.scanning = Some(ScanTask::start(self.root.clone(), self.options));
         self.progress = Progress::default();
         self.started = Instant::now();
@@ -221,6 +225,31 @@ impl App {
                 self.rescan();
             }
         }
+        loop {
+            match self.git.as_ref().map(|task| task.receiver.try_recv()) {
+                Some(Ok((id, state))) => {
+                    if let Some(b) = self.browser.as_mut()
+                        && let Some(entry) = b.repositories.get_mut(&id)
+                    {
+                        *entry = state;
+                        changed = true;
+                    }
+                }
+                Some(Err(TryRecvError::Disconnected)) => {
+                    self.git = None;
+                    if let Some(b) = self.browser.as_mut() {
+                        for state in b.repositories.values_mut() {
+                            if matches!(state, RepoState::Checking) {
+                                *state = RepoState::Unavailable("Git worker stopped".into());
+                                changed = true;
+                            }
+                        }
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
         changed
     }
 
@@ -232,6 +261,17 @@ impl App {
         if self.status == "Scanning directory…" {
             self.status = "Ready. Select an item to explore its space usage.".into();
         }
+        let mut repositories: Vec<_> = b
+            .repositories
+            .keys()
+            .map(|&id| (id, b.data.path(id)))
+            .collect();
+        repositories.sort_by_key(|(id, _)| *id);
+        self.git = if repositories.is_empty() {
+            None
+        } else {
+            Some(GitTask::start(repositories))
+        };
         self.browser = Some(b);
         self.last_click = None;
     }
