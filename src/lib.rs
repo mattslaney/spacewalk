@@ -1,4 +1,6 @@
+pub mod browser;
 pub mod scan;
+pub mod treemap;
 
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
