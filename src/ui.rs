@@ -243,7 +243,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             && let Some(repository) = b.repositories.get(&b.selected)
         {
             detail.push(Line::from(Span::styled(
-                format!(" {}", repository.summary()),
+                format!(
+                    " {}",
+                    truncate(&repository.summary(), area.width.saturating_sub(2) as usize)
+                ),
                 Style::default().fg(git_color(repository)),
             )));
         }
