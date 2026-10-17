@@ -45,6 +45,8 @@ spacewalk --help
 | n / N | Next / previous matching name in the current scope |
 | s | Cycle sort: largest, name, file count, smallest |
 | r | Rescan the original directory and preserve the current view where possible |
+| v | Hide / show the selected file or directory in the treemap |
+| V | Show all hidden items again |
 | d / Delete | Ask to permanently delete the selected item |
 | e | Show scan errors |
 | ? / F1 | Open help |
@@ -55,6 +57,10 @@ Click either panel to focus it and select an item. In the tree, click a director
 A selected directory lights up all its file blocks and gets a white outline around its region. Colors are assigned by extension. Small files may have no visible block at terminal resolution; zoom into their parent directory to see more detail. Zero-byte files and empty directories are accessible in the tree.
 
 Filtering keeps matching names and their ancestors in the tree. The map keeps the full size context. Picking a block outside the filter clears the filter so the selected item can appear in the tree. Search is scoped to the directory you are viewing.
+
+To set aside a known large item such as `target/`, select it and press `v`. The treemap excludes its entire subtree and expands the remaining blocks to fill the panel. Hidden entries stay in the tree, dimmed and marked `[hidden]`; their actual sizes and the scan totals are unchanged. Percentages and usage bars show each item's share of the remaining map, and the map title reports the visible size and hidden-item count.
+
+Press `v` on a hidden item to show it again, or `V` to restore everything. Showing a child also reveals any hidden ancestors, while independently hidden siblings stay hidden. Visibility choices survive rescans during the current session, including new files added within a hidden directory. Hiding items never changes files on disk.
 
 ## Space accounting and deletion
 

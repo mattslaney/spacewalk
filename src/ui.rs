@@ -185,7 +185,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_legend(frame, b, sections[4]);
         let selected = &b.data.nodes[b.selected];
         let path = display_name(b.data.path(b.selected).as_os_str());
-        let note = if let Some(error) = &selected.error {
+        let note = if b.is_hidden(b.selected) {
+            "  hidden from map · v show · V show all".into()
+        } else if b.visible_size(b.selected) < selected.size {
+            format!(
+                "  {} visible in map · V show all",
+                human_size(b.visible_size(b.selected))
+            )
+        } else if let Some(error) = &selected.error {
             format!("  ⚠ {error}")
         } else if selected.hard_link {
             "  hard link · space counted at another path".into()
@@ -270,10 +277,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             sections[6],
         );
     } else {
-        let keys = if area.width >= 85 {
-            " ↑↓←→ move  Tab panel  / search  s sort  r rescan  d delete  ? help  q quit"
+        let keys = if area.width >= 100 {
+            " ↑↓←→ move  Tab panel  v hide  V show all  / search  s sort  r rescan  d delete  ? help  q quit"
         } else {
-            " Arrows move Tab /find s sort r scan d del ? help q quit"
+            " Arrows Tab /find v hide V all s sort r scan d del ? q quit"
         };
         frame.render_widget(
             Paragraph::new(keys).style(Style::default().fg(MUTED)),
@@ -330,7 +337,7 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
     .split(inner);
     for (column, name) in columns
         .iter()
-        .zip(["NAME", "SIZE", "% SCOPE", "USAGE", "FILES"])
+        .zip(["NAME", "SIZE", "% MAP", "USAGE", "FILES"])
     {
         frame.render_widget(
             Paragraph::new(name).style(Style::default().fg(MUTED)),
@@ -340,10 +347,11 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
     let height = inner.height.saturating_sub(1) as usize;
     hits.page_size = height;
     b.ensure_visible(height);
-    let total = b.data.nodes[b.scope].size.max(1) as f64;
+    let total = b.visible_size(b.scope).max(1) as f64;
     for (offset, row) in b.rows.iter().skip(b.scroll).take(height).enumerate() {
         let y = inner.y + 1 + offset as u16;
         let node = &b.data.nodes[row.id];
+        let hidden = b.is_hidden(row.id);
         let selected = row.id == b.selected;
         let style = Style::default()
             .bg(if selected { SELECTED } else { PANEL })
@@ -371,14 +379,17 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             display_name(&node.name)
         };
         let name = format!(
-            "{}{} {}{}{}",
+            "{}{} {}{}{}{}",
             " ".repeat(indent),
             marker,
+            if hidden { "[hidden] " } else { "" },
             name,
             suffix,
             if node.error.is_some() { " !" } else { "" }
         );
-        let name_style = if node.kind == Kind::Directory {
+        let name_style = if hidden {
+            style.fg(MUTED).add_modifier(Modifier::DIM)
+        } else if node.kind == Kind::Directory {
             style.fg(if selected { ACCENT } else { TEXT })
         } else {
             style
@@ -392,7 +403,7 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             Paragraph::new(format!("{:>10}", human_size(node.size))).style(style),
             Rect::new(columns[1].x, y, columns[1].width, 1),
         );
-        let ratio = node.size as f64 / total;
+        let ratio = b.visible_size(row.id) as f64 / total;
         frame.render_widget(
             Paragraph::new(format!("{:>6.1}%", ratio * 100.0)).style(style),
             Rect::new(columns[2].x, y, columns[2].width, 1),
@@ -451,19 +462,33 @@ fn draw_map(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas)
     } else {
         display_name(&b.data.nodes[b.scope].name)
     };
-    let block = panel(
+    let hidden = b.hidden_in_scope();
+    let title = if hidden > 0 {
+        format!(
+            " 2 SPACE MAP · {} shown · {hidden} hidden [V show all] ",
+            human_size(b.visible_size(b.scope))
+        )
+    } else {
         format!(
             " 2 SPACE MAP · {} · Enter zoom · ⌫ out ",
             truncate(&scope, 30)
-        ),
-        b.focus == Panel::Map,
-    );
+        )
+    };
+    let block = panel(title, b.focus == Panel::Map);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     hits.map = inner;
     b.layout_map(inner);
     if b.map.leaves.is_empty() {
-        frame.render_widget(Paragraph::new("\n No space to display.\n Zero-byte files and empty directories remain in the tree.").style(Style::default().fg(MUTED)), inner);
+        let message = if hidden > 0 {
+            "\n No visible space to display.\n v toggles the selected item · V shows all hidden items."
+        } else {
+            "\n No space to display.\n Zero-byte files and empty directories remain in the tree."
+        };
+        frame.render_widget(
+            Paragraph::new(message).style(Style::default().fg(MUTED)),
+            inner,
+        );
         return;
     }
     let has_selection = !b.rows.is_empty();
@@ -570,7 +595,7 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / hjkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  r                 Rescan; preserve view where possible\n  d / Delete        Delete selected item (asks to confirm)\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. The map stays unfiltered so size context is preserved.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / hjkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  r                 Rescan; preserve view where possible\n  v                 Hide / show selected item in the map\n  V                 Show all hidden items\n  d / Delete        Delete selected item (asks to confirm)\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; v hides a subtree.\nHidden items stay in the tree; V shows everything again.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),

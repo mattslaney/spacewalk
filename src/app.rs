@@ -35,6 +35,7 @@ struct Restore {
     selected: PathBuf,
     scope: PathBuf,
     expanded: HashSet<PathBuf>,
+    hidden: HashSet<PathBuf>,
     sort: Sort,
     query: String,
     focus: Panel,
@@ -46,6 +47,7 @@ impl Restore {
             selected: b.data.path(b.selected),
             scope: b.data.path(b.scope),
             expanded: b.expanded.iter().map(|&id| b.data.path(id)).collect(),
+            hidden: b.hidden_items().map(|id| b.data.path(id)).collect(),
             sort: b.sort,
             query: b.query.clone(),
             focus: b.focus,
@@ -63,6 +65,12 @@ impl Restore {
             .filter_map(|path| b.data.find_path(path))
             .collect();
         b.expanded.insert(0);
+        let hidden: Vec<_> = self
+            .hidden
+            .iter()
+            .filter_map(|path| b.data.find_path(path))
+            .collect();
+        b.set_hidden(hidden);
         let mut scope = self.scope;
         b.scope = loop {
             if let Some(id) = b.data.find_path(&scope) {
@@ -331,6 +339,14 @@ impl App {
             KeyCode::Char('/') => self.searching = true,
             KeyCode::Esc => b.filter(String::new()),
             KeyCode::Char('s') => b.cycle_sort(),
+            KeyCode::Char('v') if !b.rows.is_empty() => {
+                b.toggle_visibility(b.selected);
+                self.last_click = None;
+            }
+            KeyCode::Char('V') => {
+                b.show_all();
+                self.last_click = None;
+            }
             KeyCode::Char('n') => b.next_match(false),
             KeyCode::Char('N') => b.next_match(true),
             KeyCode::Char('e') => {
