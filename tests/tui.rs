@@ -476,11 +476,11 @@ fn visibility_keys_reflow_the_map_and_survive_rescan_with_new_node_ids() {
     let (dir, mut app) = fixture();
     key(&mut app, KeyCode::Down);
     let old_photos = app.browser.as_ref().unwrap().selected;
-    key(&mut app, KeyCode::Char('v'));
+    key(&mut app, KeyCode::Char('h'));
     let screen = render(&mut app, 120, 42);
     assert!(screen.contains("[hidden] photos/"));
     assert!(screen.contains("3.9 KiB shown"));
-    assert!(screen.contains("1 hidden [V show all]"));
+    assert!(screen.contains("1 hidden [H show all]"));
     let b = app.browser.as_ref().unwrap();
     assert_eq!(b.data.nodes[0].size, 10000);
     assert_eq!(b.visible_size(0), 4000);
@@ -512,13 +512,13 @@ fn visibility_keys_reflow_the_map_and_survive_rescan_with_new_node_ids() {
             .len(),
         6000
     );
-    key(&mut app, KeyCode::Char('v'));
+    key(&mut app, KeyCode::Char('h'));
     assert!(!app.browser.as_ref().unwrap().is_hidden(photos));
-    key(&mut app, KeyCode::Char('v'));
+    key(&mut app, KeyCode::Char('h'));
     key(&mut app, KeyCode::Enter);
     let screen = render(&mut app, 60, 20);
     assert!(screen.contains("No visible space"));
-    key(&mut app, KeyCode::Char('V'));
+    key(&mut app, KeyCode::Char('H'));
     render(&mut app, 120, 42);
     assert_eq!(app.browser.as_ref().unwrap().hidden_items().count(), 0);
     assert_eq!(app.browser.as_ref().unwrap().visible_size(0), 11010);
@@ -530,7 +530,7 @@ fn visibility_keys_reflow_the_map_and_survive_rescan_with_new_node_ids() {
         modifiers: KeyModifiers::NONE,
     });
     assert_eq!(app.browser.as_ref().unwrap().selected, tile.id);
-    key(&mut app, KeyCode::Char('v'));
+    key(&mut app, KeyCode::Char('h'));
     render(&mut app, 120, 42);
     assert!(app.browser.as_ref().unwrap().is_hidden(tile.id));
     assert!(
@@ -542,7 +542,7 @@ fn visibility_keys_reflow_the_map_and_survive_rescan_with_new_node_ids() {
             .iter()
             .all(|t| t.id != tile.id)
     );
-    key(&mut app, KeyCode::Char('V'));
+    key(&mut app, KeyCode::Char('H'));
     render(&mut app, 120, 42);
     assert!(
         app.browser
@@ -553,4 +553,126 @@ fn visibility_keys_reflow_the_map_and_survive_rescan_with_new_node_ids() {
             .iter()
             .any(|t| t.id == tile.id)
     );
+}
+
+#[test]
+fn marked_items_are_confirmed_together_even_outside_the_current_filter() {
+    let (dir, mut app) = fixture();
+    for (index, name) in ["archive.zip", "notes.txt"].iter().enumerate() {
+        let b = app.browser.as_mut().unwrap();
+        let id = b.data.find_path(&dir.path().join(name)).unwrap();
+        b.select(id);
+        if index == 1 {
+            key(&mut app, KeyCode::Tab);
+        }
+        key(&mut app, KeyCode::Char('m'));
+    }
+    assert_eq!(app.browser.as_ref().unwrap().marked.len(), 2);
+    let screen = render(&mut app, 120, 42);
+    assert!(screen.contains("× archive.zip"));
+    assert!(screen.contains("× notes.txt"));
+    assert!(screen.contains("2 marked"));
+    key(&mut app, KeyCode::Char('m'));
+    assert_eq!(app.browser.as_ref().unwrap().marked.len(), 1);
+    key(&mut app, KeyCode::Char('m'));
+    app.browser.as_mut().unwrap().filter("no-match".into());
+    key(&mut app, KeyCode::Delete);
+    let Some(Modal::Delete(batch)) = &app.modal else {
+        panic!("batch confirmation missing")
+    };
+    assert_eq!(batch.items.len(), 2);
+    assert_eq!(batch.size, 4000);
+    assert!(render(&mut app, 60, 20).contains("Delete these 2 items?"));
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.browser.as_ref().unwrap().marked.len(), 2);
+    assert!(dir.path().join("archive.zip").exists());
+    assert!(dir.path().join("notes.txt").exists());
+    key(&mut app, KeyCode::Char('d'));
+    key(&mut app, KeyCode::Char('y'));
+    wait(&mut app);
+    assert!(!dir.path().join("archive.zip").exists());
+    assert!(!dir.path().join("notes.txt").exists());
+    assert!(dir.path().join("photos/nested/large.jpg").exists());
+    assert!(app.browser.as_ref().unwrap().marked.is_empty());
+}
+
+#[test]
+fn directory_marks_cover_children_once_and_can_be_cleared_without_deletion() {
+    let (dir, mut app) = fixture();
+    for name in ["photos", "photos/nested/large.jpg"] {
+        let b = app.browser.as_mut().unwrap();
+        let id = b.data.find_path(&dir.path().join(name)).unwrap();
+        b.select(id);
+        key(&mut app, KeyCode::Char('m'));
+    }
+    key(&mut app, KeyCode::Char('d'));
+    let Some(Modal::Delete(batch)) = &app.modal else {
+        panic!("confirmation missing")
+    };
+    assert_eq!(batch.items.len(), 1);
+    assert_eq!(batch.items[0].path, dir.path().join("photos"));
+    assert_eq!(batch.size, 6000);
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.browser.as_ref().unwrap().marked.len(), 2);
+    key(&mut app, KeyCode::Char('M'));
+    assert!(app.browser.as_ref().unwrap().marked.is_empty());
+    assert!(dir.path().join("photos/nested/large.jpg").exists());
+}
+
+#[test]
+fn marks_survive_navigation_and_rescans_but_not_replacement_items() {
+    let (dir, mut app) = fixture();
+    let notes = dir.path().join("notes.txt");
+    let b = app.browser.as_mut().unwrap();
+    let old_id = b.data.find_path(&notes).unwrap();
+    b.select(old_id);
+    key(&mut app, KeyCode::Char('m'));
+    key(&mut app, KeyCode::Char('s'));
+    app.browser.as_mut().unwrap().filter("large".into());
+    key(&mut app, KeyCode::Esc);
+    let b = app.browser.as_mut().unwrap();
+    let photos = b.data.find_path(&dir.path().join("photos")).unwrap();
+    b.select(photos);
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Backspace);
+    fs::write(dir.path().join("aaa.txt"), b"new").unwrap();
+    key(&mut app, KeyCode::Char('r'));
+    wait(&mut app);
+    let b = app.browser.as_ref().unwrap();
+    let new_id = b.data.find_path(&notes).unwrap();
+    assert_ne!(old_id, new_id);
+    assert_eq!(b.marked.iter().copied().collect::<Vec<_>>(), vec![new_id]);
+    fs::rename(&notes, dir.path().join("old-notes.txt")).unwrap();
+    fs::write(&notes, b"replacement").unwrap();
+    key(&mut app, KeyCode::Char('r'));
+    wait(&mut app);
+    assert!(app.browser.as_ref().unwrap().marked.is_empty());
+    assert_eq!(fs::read(notes).unwrap(), b"replacement");
+}
+
+#[test]
+fn hide_uses_h_while_left_arrow_collapses_and_root_cannot_be_marked() {
+    let (_dir, mut app) = fixture();
+    key(&mut app, KeyCode::Char('m'));
+    assert!(app.browser.as_ref().unwrap().marked.is_empty());
+    assert!(render(&mut app, 120, 42).contains("cannot be marked"));
+    for key_code in ['v', 'V'] {
+        key(&mut app, KeyCode::Char(key_code));
+    }
+    assert_eq!(app.browser.as_ref().unwrap().hidden_items().count(), 0);
+    key(&mut app, KeyCode::Char('h'));
+    let b = app.browser.as_ref().unwrap();
+    assert!(b.is_hidden(0));
+    assert!(b.expanded.contains(&0));
+    key(&mut app, KeyCode::Char('H'));
+    assert!(!app.browser.as_ref().unwrap().is_hidden(0));
+    key(&mut app, KeyCode::Left);
+    assert!(!app.browser.as_ref().unwrap().expanded.contains(&0));
+    key(&mut app, KeyCode::Right);
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Char('m'));
+    let mut repeat = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert_eq!(app.browser.as_ref().unwrap().marked.len(), 1);
 }

@@ -60,6 +60,7 @@ pub struct Browser {
     pub scroll: usize,
     pub map: Treemap,
     pub repositories: HashMap<NodeId, RepoState>,
+    pub marked: HashSet<NodeId>,
     map_area: Rect,
     // Node IDs map to visible row offsets; usize::MAX marks a hidden row.
     row_positions: Vec<usize>,
@@ -87,6 +88,7 @@ impl Browser {
             scroll: 0,
             map: Treemap::default(),
             repositories,
+            marked: HashSet::new(),
             map_area: Rect::default(),
             row_positions,
             included,
@@ -104,6 +106,15 @@ impl Browser {
         self.sort = self.sort.next();
         self.sort_nodes();
         self.rebuild_rows();
+    }
+
+    pub fn toggle_mark(&mut self, id: NodeId) {
+        if id == 0 {
+            return;
+        }
+        if !self.marked.remove(&id) {
+            self.marked.insert(id);
+        }
     }
 
     pub fn hidden_items(&self) -> impl Iterator<Item = NodeId> + '_ {

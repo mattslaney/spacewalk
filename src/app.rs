@@ -1,10 +1,10 @@
 use crate::{
     browser::{Browser, Panel, Sort},
     clipboard,
-    delete::DeleteRequest,
+    delete::DeleteBatch,
     display_name,
     git::{GitTask, RepoState},
-    scan::{Options, Progress, ScanEvent, ScanTask, Snapshot},
+    scan::{Identity, Kind, Options, Progress, ScanEvent, ScanTask, Snapshot},
     treemap::Direction,
 };
 use crossterm::event::{
@@ -23,7 +23,7 @@ const NOTICE_DURATION: Duration = Duration::from_secs(3);
 
 pub enum Modal {
     Help,
-    Delete(DeleteRequest),
+    Delete(DeleteBatch),
     Errors,
 }
 
@@ -40,6 +40,7 @@ struct Restore {
     scope: PathBuf,
     expanded: HashSet<PathBuf>,
     hidden: HashSet<PathBuf>,
+    marked: Vec<(PathBuf, Identity, Kind)>,
     sort: Sort,
     query: String,
     focus: Panel,
@@ -52,6 +53,17 @@ impl Restore {
             scope: b.data.path(b.scope),
             expanded: b.expanded.iter().map(|&id| b.data.path(id)).collect(),
             hidden: b.hidden_items().map(|id| b.data.path(id)).collect(),
+            marked: b
+                .marked
+                .iter()
+                .map(|&id| {
+                    (
+                        b.data.path(id),
+                        b.data.nodes[id].identity.clone(),
+                        b.data.nodes[id].kind,
+                    )
+                })
+                .collect(),
             sort: b.sort,
             query: b.query.clone(),
             focus: b.focus,
@@ -75,6 +87,15 @@ impl Restore {
             .filter_map(|path| b.data.find_path(path))
             .collect();
         b.set_hidden(hidden);
+        b.marked = self
+            .marked
+            .into_iter()
+            .filter_map(|(path, identity, kind)| {
+                let id = b.data.find_path(&path)?;
+                let node = &b.data.nodes[id];
+                (node.identity == identity && node.kind == kind).then_some(id)
+            })
+            .collect();
         let mut scope = self.scope;
         b.scope = loop {
             if let Some(id) = b.data.find_path(&scope) {
@@ -332,7 +353,11 @@ impl App {
                         let (sender, receiver) = mpsc::channel();
                         self.set_status(format!(
                             "Deleting {}…",
-                            display_name(request.path.as_os_str())
+                            if request.items.len() == 1 {
+                                display_name(request.items[0].path.as_os_str())
+                            } else {
+                                format!("{} items", request.items.len())
+                            }
                         ));
                         thread::spawn(move || {
                             let _ = sender.send(request.execute().map_err(|e| e.to_string()));
@@ -447,14 +472,24 @@ impl App {
                     let _ = sender.send(result);
                 });
             }
-            KeyCode::Char('v') if !b.rows.is_empty() => {
+            KeyCode::Char('h') if !b.rows.is_empty() => {
                 b.toggle_visibility(b.selected);
                 self.last_click = None;
             }
-            KeyCode::Char('V') => {
+            KeyCode::Char('H') => {
                 b.show_all();
                 self.last_click = None;
             }
+            KeyCode::Char('m') if key.kind == KeyEventKind::Press && !b.rows.is_empty() => {
+                if self.scanning.is_some() || self.deleting.is_some() {
+                    self.notify("Wait for the current operation before marking items.");
+                } else if b.selected == 0 {
+                    self.notify("The scan root cannot be marked for deletion.");
+                } else {
+                    b.toggle_mark(b.selected);
+                }
+            }
+            KeyCode::Char('M') if key.kind == KeyEventKind::Press => b.marked.clear(),
             KeyCode::Char('n') => b.next_match(false),
             KeyCode::Char('N') => b.next_match(true),
             KeyCode::Char('e') => {
@@ -486,8 +521,13 @@ impl App {
             KeyCode::Char('d') | KeyCode::Delete if key.kind == KeyEventKind::Press => {
                 if self.scanning.is_some() || self.deleting.is_some() {
                     self.notify("Wait for the current operation before deleting.");
-                } else if !b.rows.is_empty() {
-                    match DeleteRequest::new(&b.data, b.selected) {
+                } else if !b.marked.is_empty() || !b.rows.is_empty() {
+                    let ids = if b.marked.is_empty() {
+                        vec![b.selected]
+                    } else {
+                        b.marked.iter().copied().collect()
+                    };
+                    match DeleteBatch::new(&b.data, ids) {
                         Ok(request) => {
                             self.modal = Some(Modal::Delete(request));
                             self.modal_scroll = 0;
@@ -510,7 +550,7 @@ impl App {
                     b.move_map(Direction::Down);
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 if b.focus == Panel::Tree {
                     b.collapse();
                 } else {
