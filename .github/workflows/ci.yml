@@ -10,6 +10,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - run: sh -n install.sh
+      - run: python3 -m unittest discover -s tests -p 'test_installer.py' -v
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
