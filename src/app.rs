@@ -16,8 +16,10 @@ use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
+
+const NOTICE_DURATION: Duration = Duration::from_secs(3);
 
 pub enum Modal {
     Help,
@@ -120,6 +122,7 @@ pub struct App {
     pub deleting: Option<Receiver<Result<(), String>>>,
     pub copying: Option<Receiver<Result<PathBuf, String>>>,
     pub git: Option<GitTask>,
+    status_expires: Option<Instant>,
     exit_after_delete: bool,
     last_click: Option<(usize, Instant)>,
 }
@@ -143,6 +146,7 @@ impl App {
             deleting: None,
             copying: None,
             git: None,
+            status_expires: None,
             exit_after_delete: false,
             last_click: None,
         }
@@ -153,12 +157,36 @@ impl App {
             return;
         }
         if !self.status.starts_with("Deletion") {
-            self.status = "Scanning directory…".into();
+            self.set_status("Scanning directory…");
         }
         self.git = None;
         self.scanning = Some(ScanTask::start(self.root.clone(), self.options));
         self.progress = Progress::default();
         self.started = Instant::now();
+    }
+
+    fn set_status(&mut self, status: impl Into<String>) {
+        self.status = status.into();
+        self.status_expires = None;
+    }
+
+    fn notify(&mut self, status: impl Into<String>) {
+        self.set_status(status);
+        self.status_expires = Some(Instant::now() + NOTICE_DURATION);
+    }
+
+    fn expire_status(&mut self, now: Instant) -> bool {
+        if self.status_expires.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        self.set_status(if self.deleting.is_some() {
+            "Deleting…"
+        } else if self.scanning.is_some() {
+            "Scanning directory…"
+        } else {
+            "Ready. Select an item to explore its space usage."
+        });
+        true
     }
 
     /// Process worker updates and report whether the screen needs redrawing.
@@ -173,10 +201,10 @@ impl App {
         };
         if let Some(result) = copied {
             self.copying = None;
-            self.status = match result {
+            self.notify(match result {
                 Ok(path) => format!("Clipboard: copied {}", display_name(path.as_os_str())),
                 Err(error) => format!("Clipboard unavailable: {error}"),
-            };
+            });
             changed = true;
         }
         loop {
@@ -185,7 +213,7 @@ impl App {
                 Some(Err(TryRecvError::Disconnected)) => {
                     changed = true;
                     self.scanning = None;
-                    self.status = "Scanner stopped unexpectedly. Press r to retry.".into();
+                    self.set_status("Scanner stopped unexpectedly. Press r to retry.");
                     break;
                 }
                 _ => break,
@@ -198,7 +226,7 @@ impl App {
                     match result {
                         Ok(data) => self.accept_snapshot(data),
                         Err(error) => {
-                            self.status = format!("Scan failed: {error}. Press r to retry.")
+                            self.set_status(format!("Scan failed: {error}. Press r to retry."))
                         }
                     }
                     break;
@@ -215,10 +243,10 @@ impl App {
         if let Some(result) = result {
             changed = true;
             self.deleting = None;
-            self.status = match result {
+            self.notify(match result {
                 Ok(()) => "Deletion complete. Disk usage refreshed.".into(),
                 Err(error) => format!("Deletion failed: {error}. Refreshing usage."),
-            };
+            });
             if self.exit_after_delete {
                 self.quitting = true;
             } else {
@@ -250,7 +278,7 @@ impl App {
                 _ => break,
             }
         }
-        changed
+        changed | self.expire_status(Instant::now())
     }
 
     fn accept_snapshot(&mut self, data: Snapshot) {
@@ -259,7 +287,7 @@ impl App {
             b = restore.apply(b);
         }
         if self.status == "Scanning directory…" {
-            self.status = "Ready. Select an item to explore its space usage.".into();
+            self.set_status("Ready. Select an item to explore its space usage.");
         }
         let mut repositories: Vec<_> = b
             .repositories
@@ -279,7 +307,7 @@ impl App {
     fn quit(&mut self) {
         if self.deleting.is_some() {
             self.exit_after_delete = true;
-            self.status = "Finishing deletion before exit…".into();
+            self.set_status("Finishing deletion before exit…");
         } else {
             self.quitting = true;
         }
@@ -302,8 +330,10 @@ impl App {
                 if key.code == KeyCode::Char('y') {
                     if let Some(Modal::Delete(request)) = self.modal.take() {
                         let (sender, receiver) = mpsc::channel();
-                        self.status =
-                            format!("Deleting {}…", display_name(request.path.as_os_str()));
+                        self.set_status(format!(
+                            "Deleting {}…",
+                            display_name(request.path.as_os_str())
+                        ));
                         thread::spawn(move || {
                             let _ = sender.send(request.execute().map_err(|e| e.to_string()));
                         });
@@ -411,7 +441,7 @@ impl App {
                 let path = b.data.path(b.selected);
                 let (sender, receiver) = mpsc::channel();
                 self.copying = Some(receiver);
-                self.status = "Clipboard: copying selected path…".into();
+                self.set_status("Clipboard: copying selected path…");
                 thread::spawn(move || {
                     let result = clipboard::copy_path(&path).map(|()| path);
                     let _ = sender.send(result);
@@ -455,14 +485,14 @@ impl App {
             KeyCode::PageUp => b.move_tree(-(self.hits.page_size.max(1) as isize)),
             KeyCode::Char('d') | KeyCode::Delete if key.kind == KeyEventKind::Press => {
                 if self.scanning.is_some() || self.deleting.is_some() {
-                    self.status = "Wait for the current operation before deleting.".into();
+                    self.notify("Wait for the current operation before deleting.");
                 } else if !b.rows.is_empty() {
                     match DeleteRequest::new(&b.data, b.selected) {
                         Ok(request) => {
                             self.modal = Some(Modal::Delete(request));
                             self.modal_scroll = 0;
                         }
-                        Err(error) => self.status = error.to_string(),
+                        Err(error) => self.notify(error.to_string()),
                     }
                 }
             }
@@ -550,5 +580,119 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        git::{RemoteInfo, RepoStatus},
+        scan::scan,
+        ui,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::sync::atomic::AtomicBool;
+
+    fn fixture() -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(dir.path().into(), Options::default());
+        app.scanning = None;
+        let data = scan(
+            dir.path(),
+            Options::default(),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        let mut browser = Browser::new(data);
+        browser.repositories.insert(
+            0,
+            RepoState::Ready(RepoStatus {
+                branches: 1,
+                has_remote: true,
+                fetched: true,
+                remote: Some(RemoteInfo {
+                    name: "origin".into(),
+                    url: "git@host:team/repo.git".into(),
+                    upstream: true,
+                }),
+                ..RepoStatus::default()
+            }),
+        );
+        app.browser = Some(browser);
+        (dir, app)
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+        terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn completion_notice_expires_after_three_seconds_and_restores_git_details() {
+        let (_dir, mut app) = fixture();
+        app.notify("Deletion complete. Disk usage refreshed.");
+        let deadline = app.status_expires.unwrap();
+        let before = screen(&mut app);
+        assert!(before.contains("Deletion complete."));
+        assert!(!before.contains("Git: git@host:team/repo.git"));
+        assert!(!app.expire_status(deadline - Duration::from_nanos(1)));
+        assert!(app.expire_status(deadline));
+        let after = screen(&mut app);
+        assert!(!after.contains("Deletion complete."));
+        assert!(after.contains("Git: git@host:team/repo.git"));
+        assert!(!app.expire_status(deadline + NOTICE_DURATION));
+    }
+
+    #[test]
+    fn idle_poll_requests_a_redraw_when_a_clipboard_notice_expires() {
+        let (_dir, mut app) = fixture();
+        app.notify("Clipboard: copied /selected/path");
+        app.status_expires = Some(Instant::now() - Duration::from_millis(1));
+        assert!(app.poll_workers());
+        assert!(!app.poll_workers());
+        assert!(!screen(&mut app).contains("Clipboard: copied"));
+        assert!(screen(&mut app).contains("Git: git@host:team/repo.git"));
+    }
+
+    #[test]
+    fn new_notices_restart_the_timeout_and_progress_cancels_an_old_timeout() {
+        let (_dir, mut app) = fixture();
+        app.notify("Deletion complete.");
+        let old_deadline = Instant::now() - Duration::from_millis(1);
+        app.status_expires = Some(old_deadline);
+        app.notify("Clipboard: copied a new path");
+        assert!(!app.expire_status(old_deadline));
+        assert_eq!(app.status, "Clipboard: copied a new path");
+        let deadline = app.status_expires.unwrap();
+        app.set_status("Clipboard: copying selected path…");
+        assert!(!app.expire_status(deadline + NOTICE_DURATION));
+        assert_eq!(app.status, "Clipboard: copying selected path…");
+        app.set_status("Scan failed: permission denied. Press r to retry.");
+        assert!(!app.expire_status(deadline + NOTICE_DURATION));
+        assert!(app.status.starts_with("Scan failed:"));
+    }
+
+    #[test]
+    fn expiring_a_notice_preserves_active_scan_and_deletion_feedback() {
+        let (dir, mut app) = fixture();
+        app.scanning = Some(ScanTask::start(dir.path().into(), Options::default()));
+        app.notify("Deletion complete. Disk usage refreshed.");
+        assert!(app.expire_status(app.status_expires.unwrap()));
+        assert_eq!(app.status, "Scanning directory…");
+        app.scanning = None;
+        let (_sender, receiver) = mpsc::channel();
+        app.deleting = Some(receiver);
+        app.notify("Wait for the current operation before deleting.");
+        assert!(app.expire_status(app.status_expires.unwrap()));
+        assert_eq!(app.status, "Deleting…");
     }
 }
