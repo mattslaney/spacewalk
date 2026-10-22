@@ -33,7 +33,8 @@ spacewalk --help
 | --- | --- |
 | Tab / Shift+Tab | Switch focus between tree and map without changing selection |
 | ↑ / ↓, j / k | Move through tree rows, or between map blocks by position |
-| ← / →, h / l | Collapse / expand in the tree, or move left / right in the map |
+| ← | Collapse in the tree, or move left in the map |
+| → / l | Expand in the tree, or move right in the map |
 | Space | Toggle the selected directory in the tree |
 | Enter | Zoom into the selected directory; on a map file, zoom into its parent |
 | Backspace | Zoom out one directory |
@@ -46,9 +47,10 @@ spacewalk --help
 | s | Cycle sort: largest, name, file count, smallest |
 | c | Copy the selected item's full path to the system clipboard |
 | r | Rescan the original directory and preserve the current view where possible |
-| v | Hide / show the selected file or directory in the treemap |
-| V | Show all hidden items again |
-| d / Delete | Ask to permanently delete the selected item |
+| h | Hide / show the selected file or directory in the treemap |
+| H | Show all hidden items again |
+| m / M | Mark or unmark the selected item for deletion / clear all marks |
+| d / Delete | Ask to permanently delete marked items, or the selected item if none are marked |
 | e | Show scan errors |
 | ? / F1 | Open help |
 | q / Ctrl+C | Quit; a deletion already in progress finishes first |
@@ -80,15 +82,17 @@ A selected directory lights up all its file blocks and gets a white outline arou
 
 Filtering keeps matching names and their ancestors in the tree. The map keeps the full size context. Picking a block outside the filter clears the filter so the selected item can appear in the tree. Search is scoped to the directory you are viewing.
 
-To set aside a known large item such as `target/`, select it and press `v`. The treemap excludes its entire subtree and expands the remaining blocks to fill the panel. Hidden entries stay in the tree, dimmed and marked `[hidden]`; their actual sizes and the scan totals are unchanged. Percentages and usage bars show each item's share of the remaining map, and the map title reports the visible size and hidden-item count.
+To set aside a known large item such as `target/`, select it and press `h`. The treemap excludes its entire subtree and expands the remaining blocks to fill the panel. Hidden entries stay in the tree, dimmed and marked `[hidden]`; their actual sizes and the scan totals are unchanged. Percentages and usage bars show each item's share of the remaining map, and the map title reports the visible size and hidden-item count.
 
-Press `v` on a hidden item to show it again, or `V` to restore everything. Showing a child also reveals any hidden ancestors, while independently hidden siblings stay hidden. Visibility choices survive rescans during the current session, including new files added within a hidden directory. Hiding items never changes files on disk.
+Press `h` on a hidden item to show it again, or `H` to restore everything. Showing a child also reveals any hidden ancestors, while independently hidden siblings stay hidden. Visibility choices survive rescans during the current session, including new files added within a hidden directory. Hiding items never changes files on disk.
 
 ## Space accounting and deletion
 
 On Unix, sizes default to allocated file blocks, which handles sparse files better than logical lengths. `--apparent-size` uses logical lengths instead. On other platforms, file lengths are used. Directory metadata is excluded from totals. Descendant symbolic links are counted as links and are never followed. Unix hard-linked files count toward bytes only once per scan; additional links still appear in the tree.
 
 Scans run in a worker thread, with progress and cancellation on quit. Unreadable or disappearing entries are reported as errors, and the interface marks the totals as partial. Press `e` for details or `r` to retry. Filesystem changes appear after a rescan; successful or partially failed deletion automatically triggers one.
+
+Press `m` to mark or unmark items in either panel. Marked tree rows have an amber `×`, and the footer shows the marked count. Marks survive sorting, filtering, zooming, and rescanning when the same item still exists. Press `M` to clear every mark. With any marks set, `d` or Delete opens one confirmation listing all targets, including marks outside the current view. Marking a directory and its children deletes the directory once and counts its contents once. Canceling keeps the marks; confirming deletes the batch in the background and refreshes disk usage. The scan root cannot be marked.
 
 Deletion is **permanent**, including recursive directory deletion. The confirmation displays the path and reported size; only `y` confirms, while Enter cancels. The scan root cannot be deleted. Before removal, the application checks that the target and its ancestors still match the scan. Deleting a symlink removes the link rather than its target. Reported usage is not a guarantee of space freed: hard links, shared extents, and filesystem behavior can affect that.
 

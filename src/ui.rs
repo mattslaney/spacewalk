@@ -197,10 +197,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let selected = &b.data.nodes[b.selected];
         let path = display_name(b.data.path(b.selected).as_os_str());
         let note = if b.is_hidden(b.selected) {
-            "  hidden from map · v show · V show all".into()
+            "  hidden from map · h show · H show all".into()
         } else if b.visible_size(b.selected) < selected.size {
             format!(
-                "  {} visible in map · V show all",
+                "  {} visible in map · H show all",
                 human_size(b.visible_size(b.selected))
             )
         } else if let Some(error) = &selected.error {
@@ -299,10 +299,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             sections[6],
         );
     } else {
-        let keys = if area.width >= 100 {
-            " ↑↓←→ move  Tab panel  c copy path  v hide  V all  / search  s sort  r scan  d delete  ? help  q quit"
+        let marked = app.browser.as_ref().map_or(0, |b| b.marked.len());
+        let keys = if marked > 0 {
+            format!(" × {marked} marked · m toggle · M clear · d/Delete delete · ? help")
+        } else if area.width >= 100 {
+            " ↑↓←→ move  Tab panel  c copy  h hide H all  m mark M clear  d del  / search  s sort  r scan  ? help q".into()
         } else {
-            " Arrows Tab /find c copy v hide V all s sort r scan d del ? q"
+            " Arrows Tab h hide H all m mark M clear d del ? help q quit".into()
         };
         frame.render_widget(
             Paragraph::new(keys).style(Style::default().fg(MUTED)),
@@ -313,6 +316,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.status.starts_with("Deletion")
         || app.status.starts_with("Scan failed")
         || app.status.contains("cannot be deleted")
+        || app.status.contains("cannot be marked")
         || app.status.starts_with("Wait for")
         || app.status.starts_with("Clipboard")
     {
@@ -390,11 +394,14 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             Rect::new(inner.x, y, inner.width, 1),
         );
         let repository = b.repositories.get(&row.id);
+        let marked = b.marked.contains(&row.id);
+        let mark_icon = if marked { "× " } else { "" };
         let git_icons = repository
             .map(|state| format!("{} ", state.icons()))
             .unwrap_or_default();
-        let indent =
-            (row.depth * 2).min((columns[0].width as usize).saturating_sub(5 + git_icons.width()));
+        let indent = (row.depth * 2).min(
+            (columns[0].width as usize).saturating_sub(5 + git_icons.width() + mark_icon.width()),
+        );
         let marker = match node.kind {
             Kind::Directory if b.expanded.contains(&row.id) || !b.query.is_empty() => "▾",
             Kind::Directory => "▸",
@@ -430,8 +437,11 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             style
         };
         let width = (columns[0].width.saturating_sub(1) as usize)
-            .saturating_sub(prefix.width() + git_icons.width());
+            .saturating_sub(prefix.width() + git_icons.width() + mark_icon.width());
         let mut spans = vec![Span::styled(prefix, name_style)];
+        if marked {
+            spans.push(Span::styled(mark_icon, style.fg(WARN).bold()));
+        }
         if let Some(repository) = repository {
             spans.push(Span::styled(git_icons, style.fg(git_color(repository))));
         }
@@ -506,7 +516,7 @@ fn draw_map(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas)
     let hidden = b.hidden_in_scope();
     let title = if hidden > 0 {
         format!(
-            " 2 SPACE MAP · {} shown · {hidden} hidden [V show all] ",
+            " 2 SPACE MAP · {} shown · {hidden} hidden [H show all] ",
             human_size(b.visible_size(b.scope))
         )
     } else {
@@ -522,7 +532,7 @@ fn draw_map(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas)
     b.layout_map(inner);
     if b.map.leaves.is_empty() {
         let message = if hidden > 0 {
-            "\n No visible space to display.\n v toggles the selected item · V shows all hidden items."
+            "\n No visible space to display.\n h toggles the selected item · H shows all hidden items."
         } else {
             "\n No space to display.\n Zero-byte files and empty directories remain in the tree."
         };
@@ -636,28 +646,52 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / hjkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  c                 Copy selected path to clipboard\n  r                 Rescan; preserve view where possible\n  v                 Hide / show selected item in the map\n  V                 Show all hidden items\n  d / Delete        Delete selected item (asks to confirm)\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; v hides a subtree.\nHidden items stay in the tree; V shows everything again.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nNo network fetch; r rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  c                 Copy selected path to clipboard\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle deletion mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nNo network fetch; r rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),
         Modal::Delete(request) => {
-            let kind = if request.kind == Kind::Directory {
-                "directory and all its contents"
-            } else if request.kind == Kind::Symlink {
-                "symbolic link (target is kept)"
-            } else {
-                "file"
-            };
-            (
-                " CONFIRM PERMANENT DELETION ",
+            let text = if request.items.len() == 1 {
+                let item = &request.items[0];
+                let kind = if item.kind == Kind::Directory {
+                    "directory and all its contents"
+                } else if item.kind == Kind::Symlink {
+                    "symbolic link (target is kept)"
+                } else {
+                    "file"
+                };
                 format!(
                     "Delete this {kind}?\n\n{}\n\nReported usage: {} · {} files\n\nThis permanently removes the item; it does not use the trash.",
-                    display_name(request.path.as_os_str()),
+                    display_name(item.path.as_os_str()),
+                    human_size(item.size),
+                    item.files
+                )
+            } else {
+                let paths = request
+                    .items
+                    .iter()
+                    .map(|item| {
+                        format!(
+                            "{}{} · {}",
+                            display_name(item.path.as_os_str()),
+                            if item.kind == Kind::Directory {
+                                "/"
+                            } else {
+                                ""
+                            },
+                            human_size(item.size)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "Delete these {} items?\n\n{paths}\n\nReported total: {} · {} files\n\nDeleting a directory includes everything inside it. Symbolic link targets are kept.\nThis permanently removes the items; it does not use the trash.",
+                    request.items.len(),
                     human_size(request.size),
                     request.files
-                ),
-                true,
-            )
+                )
+            };
+            (" CONFIRM PERMANENT DELETION ", text, true)
         }
         Modal::Errors => {
             let mut text = String::new();
