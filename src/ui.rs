@@ -278,20 +278,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         );
     } else {
         let keys = if area.width >= 100 {
-            " ↑↓←→ move  Tab panel  v hide  V show all  / search  s sort  r rescan  d delete  ? help  q quit"
+            " ↑↓←→ move  Tab panel  c copy path  v hide  V all  / search  s sort  r scan  d delete  ? help  q quit"
         } else {
-            " Arrows Tab /find v hide V all s sort r scan d del ? q quit"
+            " Arrows Tab /find c copy v hide V all s sort r scan d del ? q"
         };
         frame.render_widget(
             Paragraph::new(keys).style(Style::default().fg(MUTED)),
             sections[6],
         );
     }
-    // Keep operation errors visible alongside selection details.
+    // Keep operation feedback visible alongside selection details.
     if app.status.starts_with("Deletion")
         || app.status.starts_with("Scan failed")
         || app.status.contains("cannot be deleted")
         || app.status.starts_with("Wait for")
+        || app.status.starts_with("Clipboard")
     {
         let status_area = Rect::new(
             sections[5].x,
@@ -300,7 +301,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             1,
         );
         frame.render_widget(
-            Paragraph::new(format!(" {}", app.status)).style(Style::default().fg(WARN)),
+            Paragraph::new(format!(" {}", app.status)).style(Style::default().fg(
+                if app.status.starts_with("Clipboard:") {
+                    ACCENT
+                } else {
+                    WARN
+                },
+            )),
             status_area,
         );
     }
@@ -595,7 +602,7 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / hjkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  r                 Rescan; preserve view where possible\n  v                 Hide / show selected item in the map\n  V                 Show all hidden items\n  d / Delete        Delete selected item (asks to confirm)\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; v hides a subtree.\nHidden items stay in the tree; V shows everything again.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / hjkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  c                 Copy selected path to clipboard\n  r                 Rescan; preserve view where possible\n  v                 Hide / show selected item in the map\n  V                 Show all hidden items\n  d / Delete        Delete selected item (asks to confirm)\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; v hides a subtree.\nHidden items stay in the tree; V shows everything again.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),

@@ -1,5 +1,6 @@
 use crate::{
     browser::{Browser, Panel, Sort},
+    clipboard,
     delete::DeleteRequest,
     display_name,
     scan::{Options, Progress, ScanEvent, ScanTask, Snapshot},
@@ -116,6 +117,7 @@ pub struct App {
     pub quitting: bool,
     pub hits: HitAreas,
     pub deleting: Option<Receiver<Result<(), String>>>,
+    pub copying: Option<Receiver<Result<PathBuf, String>>>,
     exit_after_delete: bool,
     last_click: Option<(usize, Instant)>,
 }
@@ -137,6 +139,7 @@ impl App {
             quitting: false,
             hits: HitAreas::default(),
             deleting: None,
+            copying: None,
             exit_after_delete: false,
             last_click: None,
         }
@@ -157,6 +160,21 @@ impl App {
     /// Process worker updates and report whether the screen needs redrawing.
     pub fn poll_workers(&mut self) -> bool {
         let mut changed = false;
+        let copied = match self.copying.as_ref().map(|receiver| receiver.try_recv()) {
+            Some(Ok(result)) => Some(result),
+            Some(Err(TryRecvError::Disconnected)) => {
+                Some(Err("Clipboard worker stopped unexpectedly".into()))
+            }
+            _ => None,
+        };
+        if let Some(result) = copied {
+            self.copying = None;
+            self.status = match result {
+                Ok(path) => format!("Clipboard: copied {}", display_name(path.as_os_str())),
+                Err(error) => format!("Clipboard unavailable: {error}"),
+            };
+            changed = true;
+        }
         loop {
             let event = match self.scanning.as_ref().map(|task| task.receiver.try_recv()) {
                 Some(Ok(event)) => event,
@@ -345,6 +363,20 @@ impl App {
             KeyCode::Char('/') => self.searching = true,
             KeyCode::Esc => b.filter(String::new()),
             KeyCode::Char('s') => b.cycle_sort(),
+            KeyCode::Char('c')
+                if key.kind == KeyEventKind::Press
+                    && !b.rows.is_empty()
+                    && self.copying.is_none() =>
+            {
+                let path = b.data.path(b.selected);
+                let (sender, receiver) = mpsc::channel();
+                self.copying = Some(receiver);
+                self.status = "Clipboard: copying selected path…".into();
+                thread::spawn(move || {
+                    let result = clipboard::copy_path(&path).map(|()| path);
+                    let _ = sender.send(result);
+                });
+            }
             KeyCode::Char('v') if !b.rows.is_empty() => {
                 b.toggle_visibility(b.selected);
                 self.last_click = None;
