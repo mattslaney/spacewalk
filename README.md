@@ -57,6 +57,21 @@ Click either panel to focus it and select an item. In the tree, click a director
 
 Press `c` in either panel to copy the selected item's absolute path, including spaces and Unicode characters, without quotes or a trailing newline. Clipboard copying runs in the background and reports success or unavailability below the selection details. Linux needs `wl-copy` from `wl-clipboard` for Wayland, or `xclip`/`xsel` for X11, with access to the desktop session. macOS uses `pbcopy`; Windows uses PowerShell's `Set-Clipboard`. Clipboard support is optional; navigation continues normally when no clipboard is available.
 
+Repository roots have a `⎇` icon in the tree, including linked worktrees, submodules, and bare repositories. Status icons appear alongside it:
+
+| Icon | Meaning |
+| --- | --- |
+| `…` | Background check in progress |
+| `✓` | Clean working tree; every local branch matches its remote upstream |
+| `*` | Staged, unstaged, or untracked changes |
+| `↑` / `↓` | At least one local branch is ahead of / behind its remote upstream |
+| `∅` | No remote is configured |
+| `?` | Status unverified: unavailable Git, unfetched remote, missing upstream, or a branch without a remote upstream |
+| `◇` | Detached HEAD; sync is unverified |
+| `≡` | Stashed changes exist |
+
+Green means synced, purple identifies repositories without remotes, amber marks other local or uncertain state, and gray means checking. Select the repository for a text explanation below the panels; `?` opens the icon legend. Checks run once in the background after each scan, use all local branches, and leave navigation responsive. Remote comparisons use **last-fetched local refs**; Spacewalk does not fetch or contact remotes. Fetch with Git separately, then press `r` to rescan and recheck. A clean checked-out branch alone is not enough for `✓`: other local branches, missing upstreams, detached HEAD, and stashes also prevent it.
+
 A selected directory lights up all its file blocks and gets a white outline around its region. Colors are assigned by extension. Small files may have no visible block at terminal resolution; zoom into their parent directory to see more detail. Zero-byte files and empty directories are accessible in the tree.
 
 Filtering keeps matching names and their ancestors in the tree. The map keeps the full size context. Picking a block outside the filter clears the filter so the selected item can appear in the tree. Search is scoped to the directory you are viewing.
@@ -82,8 +97,8 @@ cargo test --locked
 cargo build --release --locked
 ```
 
-The tests exercise scanning, hard links and symlinks, sparse files, treemap coverage and hit testing, keyboard and mouse synchronization, filtering, sorting, view restoration, deletion, terminal sizes, and the summary CLI. Deletion tests operate only on temporary fixtures. The screenshot above is rendered from synthetic data using Ratatui's test backend.
+The tests exercise scanning, hard links and symlinks, sparse files, treemap coverage and hit testing, keyboard and mouse synchronization, filtering, sorting, view restoration, clipboard handling, Git status, deletion, terminal sizes, and the summary CLI. Git tests use temporary local repositories and remotes; deletion tests operate only on temporary fixtures. The screenshot above is rendered from synthetic data using Ratatui's test backend.
 
-The code separates filesystem scanning (`scan`), navigation state (`browser`), weighted map layout (`treemap`), deletion (`delete`), event handling (`app`), and rendering (`ui`). The interface uses [Ratatui](https://docs.rs/ratatui/0.30.2/ratatui/) and [Crossterm](https://docs.rs/crossterm/0.29.0/crossterm/).
+The code separates filesystem scanning (`scan`), navigation state (`browser`), weighted map layout (`treemap`), Git checks (`git`), clipboard copying (`clipboard`), deletion (`delete`), event handling (`app`), and rendering (`ui`). The interface uses [Ratatui](https://docs.rs/ratatui/0.30.2/ratatui/) and [Crossterm](https://docs.rs/crossterm/0.29.0/crossterm/).
 
 Licensed under MIT.

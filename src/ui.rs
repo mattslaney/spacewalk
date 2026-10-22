@@ -1,7 +1,9 @@
 use crate::{
     app::{App, HitAreas, Modal},
     browser::{Browser, Panel},
-    display_name, human_size,
+    display_name,
+    git::RepoState,
+    human_size,
     scan::{Kind, Node},
 };
 use ratatui::{
@@ -59,6 +61,15 @@ fn shade(color: Color, factor: f32) -> Color {
         )
     } else {
         color
+    }
+}
+
+fn git_color(state: &RepoState) -> Color {
+    match state {
+        RepoState::Checking => MUTED,
+        RepoState::Ready(status) if status.synced() => ACCENT,
+        RepoState::Ready(status) if !status.has_remote => Color::Rgb(180, 155, 225),
+        _ => WARN,
     }
 }
 
@@ -205,7 +216,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else {
             String::new()
         };
-        let detail = if b.rows.is_empty() {
+        let mut detail = if b.rows.is_empty() {
             vec![
                 Line::from(Span::styled(
                     " No matching items",
@@ -228,6 +239,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 ]),
             ]
         };
+        if !b.rows.is_empty()
+            && let Some(repository) = b.repositories.get(&b.selected)
+        {
+            detail.push(Line::from(Span::styled(
+                format!(" {}", repository.summary()),
+                Style::default().fg(git_color(repository)),
+            )));
+        }
         frame.render_widget(Paragraph::new(detail), sections[5]);
     } else {
         let text = if app.scanning.is_some() {
@@ -367,7 +386,12 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             Block::default().style(style),
             Rect::new(inner.x, y, inner.width, 1),
         );
-        let indent = (row.depth * 2).min(columns[0].width.saturating_sub(5) as usize);
+        let repository = b.repositories.get(&row.id);
+        let git_icons = repository
+            .map(|state| format!("{} ", state.icons()))
+            .unwrap_or_default();
+        let indent =
+            (row.depth * 2).min((columns[0].width as usize).saturating_sub(5 + git_icons.width()));
         let marker = match node.kind {
             Kind::Directory if b.expanded.contains(&row.id) || !b.query.is_empty() => "▾",
             Kind::Directory => "▸",
@@ -385,13 +409,14 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
         } else {
             display_name(&node.name)
         };
-        let name = format!(
-            "{}{} {}{}{}{}",
+        let prefix = format!(
+            "{}{} {}",
             " ".repeat(indent),
             marker,
-            if hidden { "[hidden] " } else { "" },
-            name,
-            suffix,
+            if hidden { "[hidden] " } else { "" }
+        );
+        let name = format!(
+            "{name}{suffix}{}",
             if node.error.is_some() { " !" } else { "" }
         );
         let name_style = if hidden {
@@ -401,9 +426,15 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
         } else {
             style
         };
+        let width = (columns[0].width.saturating_sub(1) as usize)
+            .saturating_sub(prefix.width() + git_icons.width());
+        let mut spans = vec![Span::styled(prefix, name_style)];
+        if let Some(repository) = repository {
+            spans.push(Span::styled(git_icons, style.fg(git_color(repository))));
+        }
+        spans.push(Span::styled(truncate(&name, width), name_style));
         frame.render_widget(
-            Paragraph::new(truncate(&name, columns[0].width.saturating_sub(1) as usize))
-                .style(name_style),
+            Paragraph::new(Line::from(spans)),
             Rect::new(columns[0].x, y, columns[0].width, 1),
         );
         frame.render_widget(
@@ -602,7 +633,7 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / hjkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  c                 Copy selected path to clipboard\n  r                 Rescan; preserve view where possible\n  v                 Hide / show selected item in the map\n  V                 Show all hidden items\n  d / Delete        Delete selected item (asks to confirm)\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; v hides a subtree.\nHidden items stay in the tree; V shows everything again.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / hjkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  c                 Copy selected path to clipboard\n  r                 Rescan; preserve view where possible\n  v                 Hide / show selected item in the map\n  V                 Show all hidden items\n  d / Delete        Delete selected item (asks to confirm)\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; v hides a subtree.\nHidden items stay in the tree; V shows everything again.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nNo network fetch; r rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),

@@ -1,9 +1,10 @@
 use crate::{
+    git::{self, RepoState},
     scan::{Kind, NodeId, Snapshot},
     treemap::{Direction, Treemap},
 };
 use ratatui::layout::Rect;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Panel {
@@ -58,6 +59,7 @@ pub struct Browser {
     pub rows: Vec<TreeRow>,
     pub scroll: usize,
     pub map: Treemap,
+    pub repositories: HashMap<NodeId, RepoState>,
     map_area: Rect,
     // Node IDs map to visible row offsets; usize::MAX marks a hidden row.
     row_positions: Vec<usize>,
@@ -71,6 +73,7 @@ impl Browser {
     pub fn new(data: Snapshot) -> Self {
         let included = vec![true; data.nodes.len()];
         let row_positions = vec![usize::MAX; data.nodes.len()];
+        let repositories = git::discover(&data);
         let mut browser = Self {
             data,
             selected: 0,
@@ -83,6 +86,7 @@ impl Browser {
             rows: Vec::new(),
             scroll: 0,
             map: Treemap::default(),
+            repositories,
             map_area: Rect::default(),
             row_positions,
             included,
