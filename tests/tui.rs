@@ -224,3 +224,87 @@ fn quit_finishes_a_deletion_already_in_progress() {
     assert!(app.quitting);
     assert!(app.scanning.is_none());
 }
+
+#[test]
+fn visibility_keys_reflow_the_map_and_survive_rescan_with_new_node_ids() {
+    let (dir, mut app) = fixture();
+    key(&mut app, KeyCode::Down);
+    let old_photos = app.browser.as_ref().unwrap().selected;
+    key(&mut app, KeyCode::Char('v'));
+    let screen = render(&mut app, 120, 42);
+    assert!(screen.contains("[hidden] photos/"));
+    assert!(screen.contains("3.9 KiB shown"));
+    assert!(screen.contains("1 hidden [V show all]"));
+    let b = app.browser.as_ref().unwrap();
+    assert_eq!(b.data.nodes[0].size, 10000);
+    assert_eq!(b.visible_size(0), 4000);
+    assert!(
+        b.map
+            .leaves
+            .iter()
+            .all(|tile| !b.data.is_within(tile.id, old_photos))
+    );
+    let area = app.hits.map;
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            assert!(b.map.hit(x, y).is_some());
+        }
+    }
+    // Adding an earlier-sorted name shifts arena IDs. Visibility follows paths.
+    fs::write(dir.path().join("aaa.txt"), [0; 1000]).unwrap();
+    fs::write(dir.path().join("photos/new.jpg"), [0; 10]).unwrap();
+    key(&mut app, KeyCode::Char('r'));
+    wait(&mut app);
+    let b = app.browser.as_ref().unwrap();
+    let photos = b.data.find_path(&dir.path().join("photos")).unwrap();
+    assert_ne!(photos, old_photos);
+    assert!(b.is_hidden(photos));
+    assert_eq!(b.visible_size(0), 5000);
+    assert_eq!(
+        fs::metadata(dir.path().join("photos/nested/large.jpg"))
+            .unwrap()
+            .len(),
+        6000
+    );
+    key(&mut app, KeyCode::Char('v'));
+    assert!(!app.browser.as_ref().unwrap().is_hidden(photos));
+    key(&mut app, KeyCode::Char('v'));
+    key(&mut app, KeyCode::Enter);
+    let screen = render(&mut app, 60, 20);
+    assert!(screen.contains("No visible space"));
+    key(&mut app, KeyCode::Char('V'));
+    render(&mut app, 120, 42);
+    assert_eq!(app.browser.as_ref().unwrap().hidden_items().count(), 0);
+    assert_eq!(app.browser.as_ref().unwrap().visible_size(0), 11010);
+    let tile = app.browser.as_ref().unwrap().map.leaves[0];
+    app.mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: tile.rect.x,
+        row: tile.rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(app.browser.as_ref().unwrap().selected, tile.id);
+    key(&mut app, KeyCode::Char('v'));
+    render(&mut app, 120, 42);
+    assert!(app.browser.as_ref().unwrap().is_hidden(tile.id));
+    assert!(
+        app.browser
+            .as_ref()
+            .unwrap()
+            .map
+            .leaves
+            .iter()
+            .all(|t| t.id != tile.id)
+    );
+    key(&mut app, KeyCode::Char('V'));
+    render(&mut app, 120, 42);
+    assert!(
+        app.browser
+            .as_ref()
+            .unwrap()
+            .map
+            .leaves
+            .iter()
+            .any(|t| t.id == tile.id)
+    );
+}

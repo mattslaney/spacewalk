@@ -26,8 +26,14 @@ impl Treemap {
     /// tall as they are wide, so split direction uses physical aspect ratio.
     /// Zero-cell regions are omitted rather than exaggerating tiny files.
     pub fn build(data: &Snapshot, root: NodeId, area: Rect) -> Self {
+        let sizes: Vec<_> = data.nodes.iter().map(|node| node.size).collect();
+        Self::build_with_sizes(data, root, area, &sizes)
+    }
+
+    /// Build from view-specific subtree totals, excluding hidden entries.
+    pub fn build_with_sizes(data: &Snapshot, root: NodeId, area: Rect, sizes: &[u64]) -> Self {
         let mut map = Self::default();
-        if data.nodes[root].size == 0 || area.is_empty() {
+        if sizes[root] == 0 || area.is_empty() {
             return map;
         }
         let mut pending = vec![Tile {
@@ -45,12 +51,11 @@ impl Treemap {
                 .children
                 .iter()
                 .copied()
-                .filter(|&id| data.nodes[id].size > 0)
+                .filter(|&id| sizes[id] > 0)
                 .collect();
             children.sort_by(|&a, &b| {
-                data.nodes[b]
-                    .size
-                    .cmp(&data.nodes[a].size)
+                sizes[b]
+                    .cmp(&sizes[a])
                     .then_with(|| data.nodes[a].name.cmp(&data.nodes[b].name))
             });
             let mut partitions = vec![(0, children.len(), tile.rect)];
@@ -67,12 +72,12 @@ impl Treemap {
                 }
                 let total: u128 = children[start..end]
                     .iter()
-                    .map(|&id| data.nodes[id].size as u128)
+                    .map(|&id| sizes[id] as u128)
                     .sum();
-                let mut left = data.nodes[children[start]].size as u128;
+                let mut left = sizes[children[start]] as u128;
                 let mut mid = start + 1;
                 while mid < end - 1 {
-                    let next = left + data.nodes[children[mid]].size as u128;
+                    let next = left + sizes[children[mid]] as u128;
                     if next.abs_diff(total / 2) >= left.abs_diff(total / 2) {
                         break;
                     }

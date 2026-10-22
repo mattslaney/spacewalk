@@ -60,6 +60,9 @@ pub struct Browser {
     pub map: Treemap,
     map_area: Rect,
     included: Vec<bool>,
+    hidden: HashSet<NodeId>,
+    hidden_effective: Vec<bool>,
+    map_sizes: Vec<u64>,
 }
 
 impl Browser {
@@ -79,7 +82,11 @@ impl Browser {
             map: Treemap::default(),
             map_area: Rect::default(),
             included,
+            hidden: HashSet::new(),
+            hidden_effective: Vec::new(),
+            map_sizes: Vec::new(),
         };
+        browser.update_map_sizes();
         browser.sort_nodes();
         browser.rebuild_rows();
         browser
@@ -89,6 +96,77 @@ impl Browser {
         self.sort = self.sort.next();
         self.sort_nodes();
         self.rebuild_rows();
+    }
+
+    pub fn hidden_items(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.hidden.iter().copied()
+    }
+
+    pub fn set_hidden(&mut self, items: impl IntoIterator<Item = NodeId>) {
+        self.hidden = items.into_iter().collect();
+        self.update_map_sizes();
+    }
+
+    pub fn is_hidden(&self, id: NodeId) -> bool {
+        self.hidden_effective[id]
+    }
+
+    pub fn visible_size(&self, id: NodeId) -> u64 {
+        self.map_sizes[id]
+    }
+
+    pub fn hidden_in_scope(&self) -> usize {
+        self.hidden
+            .iter()
+            .filter(|&&id| {
+                self.data.is_within(id, self.scope) || self.data.is_within(self.scope, id)
+            })
+            .count()
+    }
+
+    pub fn toggle_visibility(&mut self, id: NodeId) {
+        if self.is_hidden(id) {
+            // Showing a child also shows its ancestors; independently hidden
+            // siblings retain their own visibility choices.
+            let mut current = Some(id);
+            while let Some(id) = current {
+                self.hidden.remove(&id);
+                current = self.data.nodes[id].parent;
+            }
+        } else {
+            self.hidden.insert(id);
+        }
+        self.update_map_sizes();
+    }
+
+    pub fn show_all(&mut self) {
+        self.hidden.clear();
+        self.update_map_sizes();
+    }
+
+    fn update_map_sizes(&mut self) {
+        self.hidden_effective.clear();
+        self.map_sizes.clear();
+        for (id, node) in self.data.nodes.iter().enumerate() {
+            let hidden = self.hidden.contains(&id)
+                || node
+                    .parent
+                    .is_some_and(|parent| self.hidden_effective[parent]);
+            self.hidden_effective.push(hidden);
+            self.map_sizes
+                .push(if hidden || node.kind == Kind::Directory {
+                    0
+                } else {
+                    node.size
+                });
+        }
+        // Children follow parents in the arena, so accumulate visible bytes in
+        // reverse order without changing the scan's actual disk usage totals.
+        for id in (1..self.data.nodes.len()).rev() {
+            let parent = self.data.nodes[id].parent.unwrap();
+            self.map_sizes[parent] = self.map_sizes[parent].saturating_add(self.map_sizes[id]);
+        }
+        self.map_area = Rect::default();
     }
 
     fn sort_nodes(&mut self) {
@@ -278,7 +356,7 @@ impl Browser {
 
     pub fn layout_map(&mut self, area: Rect) {
         if self.map_area != area {
-            self.map = Treemap::build(&self.data, self.scope, area);
+            self.map = Treemap::build_with_sizes(&self.data, self.scope, area, &self.map_sizes);
             self.map_area = area;
         }
     }
@@ -373,5 +451,57 @@ mod tests {
         b.select(id(&b, "big.bin"));
         b.collapse();
         assert_eq!(b.selected, id(&b, "deep"));
+    }
+
+    #[test]
+    fn hiding_a_subtree_reallocates_the_map_without_changing_disk_totals() {
+        let (_dir, mut b) = fixture();
+        let area = Rect::new(3, 4, 80, 20);
+        let sub = id(&b, "sub");
+        let big = id(&b, "big.bin");
+        let small = id(&b, "small.txt");
+        b.select(sub);
+        b.layout_map(area);
+        b.toggle_visibility(sub);
+        b.layout_map(area);
+        assert_eq!(b.data.nodes[0].size, 1000);
+        assert_eq!(b.visible_size(0), 100);
+        assert!(b.is_hidden(sub) && b.is_hidden(big));
+        assert_eq!(b.map.leaves.len(), 1);
+        assert_eq!(b.map.leaves[0].id, small);
+        assert_eq!(b.map.leaves[0].rect, area);
+        assert_eq!(b.map.hit(area.x, area.y), Some(small));
+        assert!(b.map.rect(sub).is_none());
+        assert_eq!(b.selected, sub);
+        assert!(b.rows.iter().any(|row| row.id == sub));
+        b.zoom_in();
+        b.layout_map(area);
+        assert!(b.map.leaves.is_empty());
+        assert_eq!(b.hidden_in_scope(), 1);
+        b.zoom_out();
+        b.toggle_visibility(sub);
+        b.layout_map(area);
+        assert_eq!(b.visible_size(0), 1000);
+        assert_eq!(b.map.leaves.len(), 2);
+    }
+
+    #[test]
+    fn showing_a_child_reveals_ancestors_and_keeps_other_hidden_items() {
+        let (_dir, mut b) = fixture();
+        let big = id(&b, "big.bin");
+        let small = id(&b, "small.txt");
+        b.set_hidden([id(&b, "sub"), big, small]);
+        assert_eq!(b.visible_size(0), 0);
+        b.toggle_visibility(big);
+        assert!(!b.is_hidden(big));
+        assert!(!b.is_hidden(id(&b, "sub")));
+        assert!(b.is_hidden(small));
+        assert_eq!(b.hidden_items().collect::<Vec<_>>(), vec![small]);
+        assert_eq!(b.visible_size(0), 900);
+        b.toggle_visibility(0);
+        assert_eq!(b.visible_size(0), 0);
+        b.show_all();
+        assert_eq!(b.hidden_items().count(), 0);
+        assert_eq!(b.visible_size(0), 1000);
     }
 }
