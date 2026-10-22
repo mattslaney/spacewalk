@@ -1,0 +1,80 @@
+# Spacewalk
+
+A Rust terminal disk usage explorer inspired by WinDirStat. Browse a file tree above a proportional treemap, with one selection shared between both panels.
+
+![Spacewalk showing a selected directory and its matching blocks](docs/preview.png)
+
+## Run
+
+Requires Rust 1.88 or newer and a terminal with at least 60 columns and 20 rows. A Unicode font and true color support give the best results.
+
+```sh
+cargo install --path . --locked
+spacewalk ~/Downloads
+```
+
+Or run directly from the checkout:
+
+```sh
+cargo run --release -- /path/to/directory
+```
+
+The directory defaults to the current directory. Hidden files are included.
+
+```sh
+spacewalk . --apparent-size   # Logical lengths rather than allocated blocks
+spacewalk . --summary         # Plain text output, including when piped
+spacewalk --help
+```
+
+## Controls
+
+| Key | Action |
+| --- | --- |
+| Tab / Shift+Tab | Switch focus between tree and map without changing selection |
+| ↑ / ↓, j / k | Move through tree rows, or between map blocks by position |
+| ← / →, h / l | Collapse / expand in the tree, or move left / right in the map |
+| Space | Toggle the selected directory in the tree |
+| Enter | Zoom into the selected directory; on a map file, zoom into its parent |
+| Backspace | Zoom out one directory |
+| Home / End, g / G | First / last visible tree row |
+| PageUp / PageDown | Move a page through the tree |
+| / | Start live, case-insensitive name filtering |
+| Enter while searching | Keep the filter and return to navigation |
+| Esc | Clear the filter, cancel deletion, or close a dialog |
+| n / N | Next / previous matching name in the current scope |
+| s | Cycle sort: largest, name, file count, smallest |
+| r | Rescan the original directory and preserve the current view where possible |
+| d / Delete | Ask to permanently delete the selected item |
+| e | Show scan errors |
+| ? / F1 | Open help |
+| q / Ctrl+C | Quit; a deletion already in progress finishes first |
+
+Click either panel to focus it and select an item. In the tree, click a directory's triangle to expand or collapse it. A map click expands the selected file's ancestors and scrolls it into view in the tree. Double-click a block to zoom into its parent directory; right-click the map to zoom out. The wheel over the tree moves its selection. Arrow keys and PageUp/PageDown scroll dialogs.
+
+A selected directory lights up all its file blocks and gets a white outline around its region. Colors are assigned by extension. Small files may have no visible block at terminal resolution; zoom into their parent directory to see more detail. Zero-byte files and empty directories are accessible in the tree.
+
+Filtering keeps matching names and their ancestors in the tree. The map keeps the full size context. Picking a block outside the filter clears the filter so the selected item can appear in the tree. Search is scoped to the directory you are viewing.
+
+## Space accounting and deletion
+
+On Unix, sizes default to allocated file blocks, which handles sparse files better than logical lengths. `--apparent-size` uses logical lengths instead. On other platforms, file lengths are used. Directory metadata is excluded from totals. Descendant symbolic links are counted as links and are never followed. Unix hard-linked files count toward bytes only once per scan; additional links still appear in the tree.
+
+Scans run in a worker thread, with progress and cancellation on quit. Unreadable or disappearing entries are reported as errors, and the interface marks the totals as partial. Press `e` for details or `r` to retry. Filesystem changes appear after a rescan; successful or partially failed deletion automatically triggers one.
+
+Deletion is **permanent**, including recursive directory deletion. The confirmation displays the path and reported size; only `y` confirms, while Enter cancels. The scan root cannot be deleted. Before removal, the application checks that the target and its ancestors still match the scan. Deleting a symlink removes the link rather than its target. Reported usage is not a guarantee of space freed: hard links, shared extents, and filesystem behavior can affect that.
+
+## Development
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo build --release --locked
+```
+
+The tests exercise scanning, hard links and symlinks, sparse files, treemap coverage and hit testing, keyboard and mouse synchronization, filtering, sorting, view restoration, deletion, terminal sizes, and the summary CLI. Deletion tests operate only on temporary fixtures. The screenshot above is rendered from synthetic data using Ratatui's test backend.
+
+The code separates filesystem scanning (`scan`), navigation state (`browser`), weighted map layout (`treemap`), deletion (`delete`), event handling (`app`), and rendering (`ui`). The interface uses [Ratatui](https://docs.rs/ratatui/0.30.2/ratatui/) and [Crossterm](https://docs.rs/crossterm/0.29.0/crossterm/).
+
+Licensed under MIT.

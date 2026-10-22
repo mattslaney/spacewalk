@@ -117,6 +117,9 @@ impl Treemap {
     /// Choose a visible block in the requested half-plane. Prefer blocks aligned
     /// with the current one, then the nearest edge and center.
     pub fn neighbor(&self, selected: NodeId, direction: Direction) -> Option<NodeId> {
+        if !self.leaves.iter().any(|tile| tile.id == selected) {
+            return self.leaves.first().map(|tile| tile.id);
+        }
         let Some(origin) = self.rect(selected) else {
             return self.leaves.first().map(|t| t.id);
         };
@@ -228,5 +231,30 @@ mod tests {
         assert_eq!(map.neighbor(1, Direction::Right), Some(2));
         assert_eq!(map.neighbor(1, Direction::Down), Some(3));
         assert_eq!(map.neighbor(1, Direction::Left), None);
+    }
+
+    #[test]
+    fn rectangle_area_tracks_bytes_and_zero_byte_files_get_no_tile() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("large"), [0; 300]).unwrap();
+        fs::write(dir.path().join("small"), [0; 100]).unwrap();
+        fs::write(dir.path().join("empty"), []).unwrap();
+        let data = scan(
+            dir.path(),
+            Options {
+                apparent_size: true,
+            },
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+        let map = Treemap::build(&data, 0, Rect::new(0, 0, 80, 20));
+        assert_eq!(map.leaves.len(), 2);
+        for tile in &map.leaves {
+            assert_eq!(
+                u64::from(tile.rect.width) * u64::from(tile.rect.height),
+                data.nodes[tile.id].size * 4
+            );
+        }
     }
 }
