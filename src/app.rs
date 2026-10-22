@@ -154,17 +154,21 @@ impl App {
         self.started = Instant::now();
     }
 
-    pub fn poll_workers(&mut self) {
+    /// Process worker updates and report whether the screen needs redrawing.
+    pub fn poll_workers(&mut self) -> bool {
+        let mut changed = false;
         loop {
             let event = match self.scanning.as_ref().map(|task| task.receiver.try_recv()) {
                 Some(Ok(event)) => event,
                 Some(Err(TryRecvError::Disconnected)) => {
+                    changed = true;
                     self.scanning = None;
                     self.status = "Scanner stopped unexpectedly. Press r to retry.".into();
                     break;
                 }
                 _ => break,
             };
+            changed = true;
             match event {
                 ScanEvent::Progress(progress) => self.progress = progress,
                 ScanEvent::Finished(result) => {
@@ -187,6 +191,7 @@ impl App {
             _ => None,
         };
         if let Some(result) = result {
+            changed = true;
             self.deleting = None;
             self.status = match result {
                 Ok(()) => "Deletion complete. Disk usage refreshed.".into(),
@@ -198,6 +203,7 @@ impl App {
                 self.rescan();
             }
         }
+        changed
     }
 
     fn accept_snapshot(&mut self, data: Snapshot) {

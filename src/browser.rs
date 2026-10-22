@@ -59,6 +59,8 @@ pub struct Browser {
     pub scroll: usize,
     pub map: Treemap,
     map_area: Rect,
+    // Node IDs map to visible row offsets; usize::MAX marks a hidden row.
+    row_positions: Vec<usize>,
     included: Vec<bool>,
     hidden: HashSet<NodeId>,
     hidden_effective: Vec<bool>,
@@ -68,6 +70,7 @@ pub struct Browser {
 impl Browser {
     pub fn new(data: Snapshot) -> Self {
         let included = vec![true; data.nodes.len()];
+        let row_positions = vec![usize::MAX; data.nodes.len()];
         let mut browser = Self {
             data,
             selected: 0,
@@ -81,6 +84,7 @@ impl Browser {
             scroll: 0,
             map: Treemap::default(),
             map_area: Rect::default(),
+            row_positions,
             included,
             hidden: HashSet::new(),
             hidden_effective: Vec::new(),
@@ -187,12 +191,16 @@ impl Browser {
     }
 
     pub fn rebuild_rows(&mut self) {
+        for row in &self.rows {
+            self.row_positions[row.id] = usize::MAX;
+        }
         self.rows.clear();
         let mut pending = vec![(self.scope, 0)];
         while let Some((id, depth)) = pending.pop() {
             if !self.query.is_empty() && !self.included[id] {
                 continue;
             }
+            self.row_positions[id] = self.rows.len();
             self.rows.push(TreeRow { id, depth });
             if !self.query.is_empty() || self.expanded.contains(&id) {
                 pending.extend(
@@ -204,9 +212,14 @@ impl Browser {
                 );
             }
         }
-        if !self.rows.iter().any(|row| row.id == self.selected) {
+        if self.row_position(self.selected).is_none() {
             self.selected = self.rows.first().map_or(self.scope, |row| row.id);
         }
+    }
+
+    fn row_position(&self, id: NodeId) -> Option<usize> {
+        let index = self.row_positions[id];
+        (index != usize::MAX).then_some(index)
     }
 
     pub fn filter(&mut self, query: String) {
@@ -272,7 +285,8 @@ impl Browser {
         if !self.query.is_empty() && !self.included[id] {
             self.filter(String::new());
         }
-        if !self.data.is_within(id, self.scope) {
+        let scope_changed = !self.data.is_within(id, self.scope);
+        if scope_changed {
             self.scope = 0;
             self.map_area = Rect::default();
         }
@@ -282,18 +296,18 @@ impl Browser {
             current = parent;
         }
         self.selected = id;
-        self.rebuild_rows();
+        // Already-visible selections only change the highlight. Rebuild when
+        // revealing a collapsed path or returning to the root scope.
+        if scope_changed || self.row_position(id).is_none() {
+            self.rebuild_rows();
+        }
     }
 
     pub fn move_tree(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
         }
-        let index = self
-            .rows
-            .iter()
-            .position(|r| r.id == self.selected)
-            .unwrap_or(0);
+        let index = self.row_position(self.selected).unwrap_or(0);
         let next = index.saturating_add_signed(delta).min(self.rows.len() - 1);
         self.selected = self.rows[next].id;
     }
@@ -350,6 +364,7 @@ impl Browser {
             self.scope = parent;
             self.expanded.insert(parent);
             self.select(old);
+            self.rebuild_rows();
             self.map_area = Rect::default();
         }
     }
@@ -371,7 +386,7 @@ impl Browser {
         if height == 0 {
             return;
         }
-        if let Some(index) = self.rows.iter().position(|r| r.id == self.selected) {
+        if let Some(index) = self.row_position(self.selected) {
             if index < self.scroll {
                 self.scroll = index;
             }
@@ -451,6 +466,62 @@ mod tests {
         b.select(id(&b, "big.bin"));
         b.collapse();
         assert_eq!(b.selected, id(&b, "deep"));
+    }
+
+    #[test]
+    fn navigation_follows_current_rows_after_view_changes() {
+        fn walk_rows(b: &mut Browser) {
+            let ids: Vec<_> = b.rows.iter().map(|row| row.id).collect();
+            b.selected = ids[0];
+            for &id in &ids {
+                assert_eq!(b.selected, id);
+                b.ensure_visible(1);
+                assert_eq!(b.rows[b.scroll].id, id);
+                b.move_tree(1);
+            }
+            for &id in ids.iter().rev() {
+                assert_eq!(b.selected, id);
+                b.ensure_visible(1);
+                assert_eq!(b.rows[b.scroll].id, id);
+                b.move_tree(-1);
+            }
+        }
+
+        let (_dir, mut b) = fixture();
+        let big = id(&b, "big.bin");
+        let deep = id(&b, "deep");
+        let sub = id(&b, "sub");
+        let small = id(&b, "small.txt");
+        b.select(big);
+        walk_rows(&mut b);
+        b.select(deep);
+        b.collapse();
+        assert!(!b.rows.iter().any(|row| row.id == big));
+        b.select(big);
+        assert!(b.rows.iter().any(|row| row.id == big));
+        walk_rows(&mut b);
+        b.cycle_sort();
+        walk_rows(&mut b);
+        b.filter("big".into());
+        walk_rows(&mut b);
+        b.select(small);
+        assert!(b.query.is_empty());
+        walk_rows(&mut b);
+        b.select(deep);
+        b.zoom_in();
+        walk_rows(&mut b);
+        b.zoom_out();
+        assert_eq!(b.rows[0].id, sub);
+        walk_rows(&mut b);
+        b.select(small);
+        assert_eq!(b.rows[0].id, 0);
+        walk_rows(&mut b);
+        b.filter("no-match".into());
+        b.move_tree(1);
+        b.ensure_visible(1);
+        assert!(b.rows.is_empty());
+        b.filter(String::new());
+        walk_rows(&mut b);
     }
 
     #[test]

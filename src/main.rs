@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton,
+        MouseEventKind,
+    },
     execute,
 };
 use spacewalk::{
@@ -101,13 +104,31 @@ fn run_ui(root: PathBuf, options: Options) -> Result<()> {
         previous_hook(info);
     }));
     let mut app = spacewalk::app::App::new(root, options);
+    let mut redraw = true;
     while !app.quitting {
-        app.poll_workers();
-        terminal.draw(|frame| spacewalk::ui::draw(frame, &mut app))?;
+        redraw |= app.poll_workers();
+        if redraw {
+            terminal.draw(|frame| spacewalk::ui::draw(frame, &mut app))?;
+        }
+        redraw = false;
         if event::poll(Duration::from_millis(80))? {
             match event::read()? {
-                Event::Key(key) => app.key(key),
-                Event::Mouse(mouse) => app.mouse(mouse),
+                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                    app.key(key);
+                    redraw = true;
+                }
+                Event::Mouse(mouse)
+                    if matches!(
+                        mouse.kind,
+                        MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
+                            | MouseEventKind::ScrollUp
+                            | MouseEventKind::ScrollDown
+                    ) =>
+                {
+                    app.mouse(mouse);
+                    redraw = true;
+                }
+                Event::Resize(_, _) => redraw = true,
                 _ => {}
             }
         }
