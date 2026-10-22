@@ -3,7 +3,7 @@ use ratatui::{Terminal, backend::TestBackend};
 use spacewalk::{
     app::{App, Modal},
     browser::Panel,
-    git::{RepoState, RepoStatus},
+    git::{RemoteInfo, RepoState, RepoStatus},
     scan::Options,
     ui,
 };
@@ -376,6 +376,44 @@ fn git_icons_and_colors_distinguish_sync_changes_and_missing_remotes() {
             assert_eq!(cell.fg, color);
         }
     }
+}
+
+#[test]
+fn selected_repository_displays_its_remote_url_before_status_details() {
+    let (_dir, mut app) = fixture();
+    let b = app.browser.as_mut().unwrap();
+    b.repositories.insert(
+        b.selected,
+        RepoState::Ready(RepoStatus {
+            branches: 1,
+            has_remote: true,
+            fetched: true,
+            remote: Some(RemoteInfo {
+                name: "upstream".into(),
+                url: "git@github.com:team/repo.git".into(),
+                upstream: true,
+            }),
+            ..RepoStatus::default()
+        }),
+    );
+    for (width, height) in [(60, 20), (120, 42)] {
+        let screen = render(&mut app, width, height);
+        assert!(screen.contains("Git: git@github.com:team/repo.git"));
+        assert!(screen.contains("upstream upstream"));
+        assert!(screen.contains("⎇ ✓"));
+    }
+    let b = app.browser.as_mut().unwrap();
+    let RepoState::Ready(status) = b.repositories.get_mut(&b.selected).unwrap() else {
+        unreachable!()
+    };
+    status.remote.as_mut().unwrap().url =
+        format!("https://host/{}/repo.git", "long-namespace/".repeat(10));
+    let screen = render(&mut app, 60, 20);
+    let line = screen
+        .lines()
+        .find(|line| line.contains("Git: https://host/"))
+        .unwrap();
+    assert!(line.contains('…'));
 }
 
 #[test]

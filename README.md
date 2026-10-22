@@ -72,6 +72,8 @@ Repository roots have a `⎇` icon in the tree, including linked worktrees, subm
 
 Green means synced, purple identifies repositories without remotes, amber marks other local or uncertain state, and gray means checking. Select the repository for a text explanation below the panels; `?` opens the icon legend. Checks run once in the background after each scan, use all local branches, and leave navigation responsive. Remote comparisons use **last-fetched local refs**; Spacewalk does not fetch or contact remotes. Fetch with Git separately, then press `r` to rescan and recheck. A clean checked-out branch alone is not enough for `✓`: other local branches, missing upstreams, detached HEAD, and stashes also prevent it.
 
+The selected repository's Git detail line starts with its upstream remote URL. It uses the checked-out branch's configured remote; if that is unavailable, it shows `origin` or the first configured remote, labeled as a fallback remote. URLs are looked up in the background, and long lines end with an ellipsis. Embedded HTTP credentials are omitted from display.
+
 A selected directory lights up all its file blocks and gets a white outline around its region. Colors are assigned by extension. Small files may have no visible block at terminal resolution; zoom into their parent directory to see more detail. Zero-byte files and empty directories are accessible in the tree.
 
 Filtering keeps matching names and their ancestors in the tree. The map keeps the full size context. Picking a block outside the filter clears the filter so the selected item can appear in the tree. Search is scoped to the directory you are viewing.

@@ -1,6 +1,7 @@
 use crate::scan::{Kind, NodeId, Snapshot};
 use std::{
     collections::HashMap,
+    ffi::OsStr,
     io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -34,6 +35,14 @@ pub struct RepoStatus {
     pub unborn: bool,
     pub stashed: bool,
     pub bare: bool,
+    pub remote: Option<RemoteInfo>,
+}
+
+#[derive(Debug)]
+pub struct RemoteInfo {
+    pub name: String,
+    pub url: String,
+    pub upstream: bool,
 }
 
 impl RepoStatus {
@@ -100,8 +109,23 @@ impl RepoState {
             Self::Unavailable(error) => return format!("Git: status unavailable ({error})"),
             Self::Ready(status) => status,
         };
+        // Put the URL first so it remains visible before lengthy status details.
+        let remote = status.remote.as_ref().map_or_else(String::new, |remote| {
+            format!(
+                "{} · {} {} · ",
+                display_url(&remote.url),
+                if remote.upstream {
+                    "upstream"
+                } else {
+                    "remote"
+                },
+                crate::display_name(OsStr::new(&remote.name)),
+            )
+        });
         if status.synced() {
-            return "Git: clean; every local branch matches its remote upstream (last-fetched refs)".into();
+            return format!(
+                "Git: {remote}clean; every local branch matches its remote upstream (last-fetched refs)"
+            );
         }
         let mut details = vec![if status.bare {
             "bare repository".into()
@@ -138,8 +162,21 @@ impl RepoState {
         if status.has_remote && status.fetched {
             details.push("last-fetched refs".into());
         }
-        format!("Git: {}", details.join(" · "))
+        format!("Git: {remote}{}", details.join(" · "))
     }
+}
+
+fn display_url(url: &str) -> String {
+    // HTTP remotes can contain embedded credentials; show the repository URL.
+    if let Some((scheme, rest)) = url.split_once("://")
+        && (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+    {
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if let Some((_, host)) = rest[..end].rsplit_once('@') {
+            return crate::display_name(OsStr::new(&format!("{scheme}://{host}{}", &rest[end..])));
+        }
+    }
+    crate::display_name(OsStr::new(url))
 }
 
 /// Detect repository roots from the existing scan, including .git files used
@@ -241,16 +278,17 @@ fn inspect(path: &Path, cancel: &AtomicBool) -> Result<RepoStatus, String> {
         path,
         &[
             "for-each-ref",
-            "--format=%(refname)%00%(upstream)%00%(upstream:track)%00",
+            "--format=%(refname)%00%(upstream)%00%(upstream:track)%00%(HEAD)%00%(upstream:remotename)%00",
             "refs/heads",
             "refs/remotes",
             "refs/stash",
         ],
         cancel,
     )?;
+    let mut upstream_remote = None;
     for line in output.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
         let fields: Vec<_> = line.split(|&b| b == 0).collect();
-        if fields.len() != 4 {
+        if fields.len() != 6 {
             return Err("unexpected Git branch output".into());
         }
         if fields[0].starts_with(b"refs/remotes/") {
@@ -259,6 +297,9 @@ fn inspect(path: &Path, cancel: &AtomicBool) -> Result<RepoStatus, String> {
             status.stashed = true;
         } else if fields[0].starts_with(b"refs/heads/") {
             status.branches += 1;
+            if fields[3] == b"*" && !fields[4].is_empty() && fields[4] != b"." {
+                upstream_remote = Some(String::from_utf8_lossy(fields[4]).into_owned());
+            }
             if !fields[1].starts_with(b"refs/remotes/") {
                 status.no_upstream += 1;
                 continue;
@@ -269,6 +310,27 @@ fn inspect(path: &Path, cancel: &AtomicBool) -> Result<RepoStatus, String> {
             status.behind += usize::from(track.contains("behind "));
             status.gone += usize::from(track == "[gone]");
         }
+    }
+    let remotes = String::from_utf8_lossy(&remotes);
+    let names: Vec<_> = remotes.lines().collect();
+    let upstream = upstream_remote
+        .as_deref()
+        .filter(|name| names.contains(name));
+    let chosen = upstream
+        .or_else(|| names.iter().copied().find(|&name| name == "origin"))
+        .or_else(|| names.first().copied());
+    if let Some(name) = chosen
+        && let Ok(output) = run(path, &["remote", "get-url", "--", name], cancel)
+    {
+        let output = output
+            .strip_suffix(b"\r\n")
+            .or_else(|| output.strip_suffix(b"\n"))
+            .unwrap_or(&output);
+        status.remote = Some(RemoteInfo {
+            name: name.into(),
+            url: String::from_utf8_lossy(output).into_owned(),
+            upstream: upstream.is_some(),
+        });
     }
     Ok(status)
 }
@@ -472,6 +534,77 @@ mod tests {
         assert!(state.has_remote);
         assert!(!state.fetched);
         assert_eq!(RepoState::Ready(state).icons(), "⎇ ?");
+    }
+
+    #[test]
+    fn selected_url_uses_the_current_branch_upstream_instead_of_assuming_origin() {
+        let (dir, path) = fixture(true);
+        let initial = status(&path).remote.unwrap();
+        assert_eq!(initial.name, "origin");
+        assert!(initial.upstream);
+        assert_eq!(Path::new(&initial.url), dir.path().join("remote.git"));
+        git(&path, &["remote", "add", "company/upstream", &initial.url]);
+        git(&path, &["fetch", "company/upstream"]);
+        git(
+            &path,
+            &["branch", "--set-upstream-to=company/upstream/main"],
+        );
+        let url = "git@github.com:team/upstream.git";
+        git(&path, &["remote", "set-url", "company/upstream", url]);
+        let state = status(&path);
+        assert!(state.synced());
+        let remote = state.remote.as_ref().unwrap();
+        assert_eq!(remote.name, "company/upstream");
+        assert_eq!(remote.url, url);
+        assert!(remote.upstream);
+        assert!(
+            RepoState::Ready(state)
+                .summary()
+                .starts_with(&format!("Git: {url}"))
+        );
+    }
+
+    #[test]
+    fn untracked_and_detached_branches_use_a_labeled_fallback_remote() {
+        let (_dir, path) = fixture(true);
+        git(&path, &["branch", "--unset-upstream"]);
+        let remote = status(&path).remote.unwrap();
+        assert_eq!(remote.name, "origin");
+        assert!(!remote.upstream);
+        git(&path, &["remote", "rename", "origin", "backup"]);
+        git(
+            &path,
+            &["remote", "add", "zzz", "https://example.invalid/repo.git"],
+        );
+        git(&path, &["switch", "--detach"]);
+        let state = status(&path);
+        assert!(state.detached);
+        assert_eq!(state.remote.as_ref().unwrap().name, "backup");
+        assert!(!state.remote.as_ref().unwrap().upstream);
+        assert!(RepoState::Ready(state).summary().contains("remote backup"));
+        git(&path, &["remote", "remove", "backup"]);
+        git(&path, &["remote", "remove", "zzz"]);
+        assert!(status(&path).remote.is_none());
+    }
+
+    #[test]
+    fn displayed_urls_preserve_ssh_and_local_paths_and_omit_http_credentials() {
+        for url in [
+            "git@github.com:team/repo.git",
+            "ssh://git@host/repo",
+            "/tmp/my remote.git",
+        ] {
+            assert_eq!(display_url(url), url);
+        }
+        assert_eq!(
+            display_url("https://user:secret@host/team/repo.git"),
+            "https://host/team/repo.git"
+        );
+        assert_eq!(
+            display_url("https://token@host/repo.git"),
+            "https://host/repo.git"
+        );
+        assert!(!display_url("https://host/\x1b[31mrepo.git").contains('\x1b'));
     }
 
     #[test]
