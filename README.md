@@ -81,6 +81,7 @@ spacewalk --help
 | ← | Collapse in the tree, or move left in the map |
 | → / l | Expand in the tree, or move right in the map |
 | Space | Toggle the selected directory in the tree |
+| + / - | Expand / collapse all folders beneath the selected folder (tree focus) |
 | Enter | Zoom into the selected directory; on a map file, zoom into its parent |
 | Backspace | Zoom out one directory |
 | Home / End, g / G | First / last visible tree row |
@@ -105,6 +106,13 @@ spacewalk --help
 | e | Show scan errors |
 | ? / F1 | Open help |
 | q / Ctrl+C | Quit; a deletion already in progress finishes first |
+
+With tree focus, press `+` to expand the selected folder and all its descendant
+folders, or `-` to collapse the whole selected subtree. Selection stays on that
+folder, and sibling subtrees keep their current expansion state. These controls
+also work during name search and age/size filtering, and their expansion choices
+survive rescans. Files and symlinks have no subtree to expand. Map focus keeps its
+existing navigation; switch to the tree with Tab before using these shortcuts.
 
 Click either panel to focus it and select an item. In the tree, click a directory's triangle to expand or collapse it. A map click expands the selected file's ancestors and scrolls it into view in the tree. Double-click a block to zoom into its parent directory; right-click the map to zoom out. The wheel over the tree moves its selection. Arrow keys and PageUp/PageDown scroll dialogs.
 

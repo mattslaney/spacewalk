@@ -56,6 +56,8 @@ pub struct Browser {
     pub selected: NodeId,
     pub scope: NodeId,
     pub expanded: HashSet<NodeId>,
+    // Explicit folds override paths that search or view filters open by default.
+    pub collapsed: HashSet<NodeId>,
     pub focus: Panel,
     pub sort: Sort,
     pub query: String,
@@ -89,6 +91,7 @@ impl Browser {
             selected: 0,
             scope: 0,
             expanded: HashSet::from([0]),
+            collapsed: HashSet::new(),
             focus: Panel::Tree,
             sort: Sort::Largest,
             query: String::new(),
@@ -187,7 +190,8 @@ impl Browser {
         }
     }
     pub fn open_in_view(&self, id: NodeId) -> bool {
-        self.expanded.contains(&id) || !self.query.is_empty() || self.is_context(id)
+        !self.collapsed.contains(&id)
+            && (self.expanded.contains(&id) || !self.query.is_empty() || self.is_context(id))
     }
 
     pub fn cycle_sort(&mut self) {
@@ -334,6 +338,7 @@ impl Browser {
             let mut current = self.selected;
             while let Some(parent) = self.data.nodes[current].parent {
                 self.expanded.insert(parent);
+                self.collapsed.remove(&parent);
                 current = parent;
             }
         }
@@ -361,7 +366,7 @@ impl Browser {
             .copied()
             .find(|&id| self.data.is_within(id, self.scope))
         {
-            self.selected = id;
+            self.select(id);
         }
         self.scroll = 0;
     }
@@ -403,6 +408,7 @@ impl Browser {
         let mut current = id;
         while let Some(parent) = self.data.nodes[current].parent {
             self.expanded.insert(parent);
+            self.collapsed.remove(&parent);
             current = parent;
         }
         self.selected = id;
@@ -426,7 +432,8 @@ impl Browser {
         if self.data.nodes[self.selected].kind != Kind::Directory {
             return;
         }
-        if self.expanded.insert(self.selected) {
+        let folded = self.collapsed.remove(&self.selected);
+        if self.expanded.insert(self.selected) || folded {
             self.rebuild_rows();
         } else if let Some(row) = self
             .rows
@@ -438,7 +445,11 @@ impl Browser {
     }
 
     pub fn collapse(&mut self) {
-        if self.expanded.remove(&self.selected) {
+        if self.data.nodes[self.selected].kind == Kind::Directory
+            && self.open_in_view(self.selected)
+        {
+            self.expanded.remove(&self.selected);
+            self.collapsed.insert(self.selected);
             self.rebuild_rows();
         } else if self.selected != self.scope
             && let Some(parent) = self.data.nodes[self.selected].parent
@@ -451,8 +462,40 @@ impl Browser {
         if self.data.nodes[id].kind != Kind::Directory {
             return;
         }
-        if !self.expanded.remove(&id) {
+        if self.open_in_view(id) {
+            self.expanded.remove(&id);
+            self.collapsed.insert(id);
+        } else {
+            self.collapsed.remove(&id);
             self.expanded.insert(id);
+        }
+        self.rebuild_rows();
+    }
+
+    pub fn expand_all(&mut self) {
+        self.set_subtree_expanded(true);
+    }
+    pub fn collapse_all(&mut self) {
+        self.set_subtree_expanded(false);
+    }
+
+    fn set_subtree_expanded(&mut self, expanded: bool) {
+        if self.rows.is_empty() || self.data.nodes[self.selected].kind != Kind::Directory {
+            return;
+        }
+        let mut pending = vec![self.selected];
+        while let Some(id) = pending.pop() {
+            if self.data.nodes[id].kind != Kind::Directory {
+                continue;
+            }
+            if expanded {
+                self.collapsed.remove(&id);
+                self.expanded.insert(id);
+            } else {
+                self.expanded.remove(&id);
+                self.collapsed.insert(id);
+            }
+            pending.extend(self.data.nodes[id].children.iter().copied());
         }
         self.rebuild_rows();
     }
@@ -463,6 +506,7 @@ impl Browser {
         }
         self.scope = self.selected;
         self.expanded.insert(self.scope);
+        self.collapsed.remove(&self.scope);
         self.scroll = 0;
         self.rebuild_rows();
         self.map_area = Rect::default();
@@ -473,6 +517,7 @@ impl Browser {
             let old = self.scope;
             self.scope = parent;
             self.expanded.insert(parent);
+            self.collapsed.remove(&parent);
             self.select(old);
             self.rebuild_rows();
             self.map_area = Rect::default();

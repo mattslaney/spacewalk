@@ -136,6 +136,115 @@ fn keyboard_and_mouse_link_both_panels_and_search() {
 }
 
 #[test]
+fn subtree_shortcuts_preserve_siblings_selection_filters_and_rescans() {
+    use spacewalk::filters::ViewFilters;
+
+    let (dir, mut app) = fixture();
+    fs::create_dir_all(dir.path().join("other/deep")).unwrap();
+    fs::write(dir.path().join("other/deep/keep.bin"), [0; 500]).unwrap();
+    app.rescan();
+    wait(&mut app);
+    let id = |app: &App, path: &str| {
+        app.browser
+            .as_ref()
+            .unwrap()
+            .data
+            .find_path(&dir.path().join(path))
+            .unwrap()
+    };
+    let visible = |app: &App, path: &str| {
+        app.browser
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .any(|row| row.id == id(app, path))
+    };
+    let other = id(&app, "other");
+    app.browser.as_mut().unwrap().select(other);
+    key(&mut app, KeyCode::Char('+'));
+    let photos = id(&app, "photos");
+    app.browser.as_mut().unwrap().select(photos);
+    key(&mut app, KeyCode::Char('m'));
+    render(&mut app, 140, 42);
+    let map = app.browser.as_ref().unwrap().map.leaves.clone();
+    key(&mut app, KeyCode::Char('+'));
+    assert!(visible(&app, "photos/nested/large.jpg"));
+    assert!(visible(&app, "other/deep/keep.bin"));
+    assert_eq!(app.browser.as_ref().unwrap().selected, photos);
+    key(&mut app, KeyCode::Char('-'));
+    assert!(!visible(&app, "photos/nested"));
+    assert!(visible(&app, "other/deep/keep.bin"));
+    // Opening just the parent must leave its descendants collapsed too.
+    key(&mut app, KeyCode::Right);
+    assert!(visible(&app, "photos/nested"));
+    assert!(!visible(&app, "photos/nested/large.jpg"));
+    key(&mut app, KeyCode::Char('-'));
+    key(&mut app, KeyCode::Char('-'));
+    assert_eq!(app.browser.as_ref().unwrap().selected, photos);
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Char('+'));
+    assert!(!visible(&app, "photos/nested"));
+    key(&mut app, KeyCode::Tab);
+    let mut repeat = KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(!visible(&app, "photos/nested"));
+    key(&mut app, KeyCode::Char('+'));
+    assert!(visible(&app, "photos/nested/large.jpg"));
+    render(&mut app, 140, 42);
+    let b = app.browser.as_ref().unwrap();
+    assert!(b.marked.contains(&photos));
+    assert_eq!(
+        b.map
+            .leaves
+            .iter()
+            .map(|t| (t.id, t.rect))
+            .collect::<Vec<_>>(),
+        map.iter().map(|t| (t.id, t.rect)).collect::<Vec<_>>()
+    );
+    let file = id(&app, "photos/nested/large.jpg");
+    app.browser.as_mut().unwrap().select(file);
+    key(&mut app, KeyCode::Char('-'));
+    key(&mut app, KeyCode::Char('+'));
+    assert_eq!(app.browser.as_ref().unwrap().selected, file);
+
+    // Search normally opens matching paths, but explicit subtree folds win.
+    app.browser.as_mut().unwrap().filter("large".into());
+    app.browser.as_mut().unwrap().select(photos);
+    key(&mut app, KeyCode::Char('-'));
+    assert!(!visible(&app, "photos/nested"));
+    fs::write(dir.path().join("aaa-new"), [0; 20]).unwrap();
+    app.rescan();
+    wait(&mut app);
+    assert_eq!(app.browser.as_ref().unwrap().query, "large");
+    assert_eq!(app.browser.as_ref().unwrap().selected, id(&app, "photos"));
+    assert!(!visible(&app, "photos/nested"));
+    key(&mut app, KeyCode::Char('+'));
+    assert!(visible(&app, "photos/nested/large.jpg"));
+
+    // Age/size context folders can also be folded, including the scan root.
+    key(&mut app, KeyCode::Esc);
+    let filters = ViewFilters {
+        min_size: Some(5000),
+        min_age_days: None,
+    };
+    let b = app.browser.as_mut().unwrap();
+    b.set_view_filters(filters);
+    b.select(0);
+    assert!(b.is_context(0));
+    key(&mut app, KeyCode::Char('-'));
+    assert_eq!(app.browser.as_ref().unwrap().rows.len(), 1);
+    app.rescan();
+    wait(&mut app);
+    assert_eq!(app.browser.as_ref().unwrap().rows.len(), 1);
+    key(&mut app, KeyCode::Char('+'));
+    assert!(visible(&app, "photos/nested/large.jpg"));
+    assert!(!visible(&app, "other"));
+    assert_eq!(app.browser.as_ref().unwrap().view_filters, filters);
+}
+
+#[test]
 fn rescan_restores_view_and_delete_requires_explicit_confirmation() {
     let (dir, mut app) = fixture();
     key(&mut app, KeyCode::Down);

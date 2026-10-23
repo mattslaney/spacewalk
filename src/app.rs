@@ -164,6 +164,7 @@ struct Restore {
     selected: PathBuf,
     scope: PathBuf,
     expanded: HashSet<PathBuf>,
+    collapsed: HashSet<PathBuf>,
     hidden: HashSet<PathBuf>,
     marked: Vec<(PathBuf, Identity, Kind)>,
     sort: Sort,
@@ -178,6 +179,7 @@ impl Restore {
             selected: b.data.path(b.selected),
             scope: b.data.path(b.scope),
             expanded: b.expanded.iter().map(|&id| b.data.path(id)).collect(),
+            collapsed: b.collapsed.iter().map(|&id| b.data.path(id)).collect(),
             hidden: b.hidden_items().map(|id| b.data.path(id)).collect(),
             marked: b
                 .marked
@@ -247,6 +249,16 @@ impl Restore {
             b.set_view_filters(self.view_filters);
         }
         b.filter(self.query);
+        // Filtering normally reveals matches. Restore explicit folds afterward
+        // so a rescan keeps the user's subtree view, including during search.
+        b.collapsed = self
+            .collapsed
+            .iter()
+            .filter_map(|path| b.data.find_path(path))
+            .collect();
+        if !b.collapsed.is_empty() {
+            b.rebuild_rows();
+        }
         if b.rows.iter().any(|r| r.id == selected_id) {
             b.selected = selected_id;
         } else if b.query.is_empty() {
@@ -1187,6 +1199,24 @@ impl App {
                 }
             }
             KeyCode::Char(' ') if b.focus == Panel::Tree => b.toggle(b.selected),
+            KeyCode::Char('+')
+                if b.focus == Panel::Tree
+                    && key.kind == KeyEventKind::Press
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                b.expand_all()
+            }
+            KeyCode::Char('-')
+                if b.focus == Panel::Tree
+                    && key.kind == KeyEventKind::Press
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                b.collapse_all()
+            }
             _ => {}
         }
     }
