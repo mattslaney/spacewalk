@@ -986,6 +986,8 @@ fn git_jobs_block_other_mutations_and_quit_cancels_safely() {
     wait(&mut app);
     app.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
     assert!(app.git_action.is_some());
+    assert!(matches!(app.modal, Some(Modal::Progress)));
+    key(&mut app, KeyCode::Esc);
     key(&mut app, KeyCode::Char('a'));
     assert!(app.modal.is_none());
     assert!(app.status.starts_with("Wait for"));
@@ -997,4 +999,65 @@ fn git_jobs_block_other_mutations_and_quit_cancels_safely() {
     assert!(!app.quitting);
     wait(&mut app);
     assert!(app.quitting);
+}
+
+#[test]
+fn floating_progress_opens_hides_reopens_and_yields_to_the_result() {
+    let (dir, mut app) = fixture();
+    app.browser.as_mut().unwrap().select(0);
+    key(&mut app, KeyCode::Char('a'));
+    type_text(&mut app, "progress-folder");
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(app.modal, Some(Modal::Progress)));
+    let screen = render(&mut app, 60, 20);
+    assert!(screen.contains("OPERATION PROGRESS"));
+    assert!(screen.contains("Create folder"));
+    assert!(screen.contains("elapsed"));
+    assert!(screen.contains("F4 cancel"));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.modal.is_none());
+    assert!(app.file_task.is_some());
+    assert!(render(&mut app, 120, 42).contains("F3 progress"));
+    key(&mut app, KeyCode::F(3));
+    assert!(matches!(app.modal, Some(Modal::Progress)));
+    let operation = app.operation.as_mut().unwrap();
+    for n in 0..40 {
+        operation.record(&format!("progress line {n}"));
+    }
+    assert!(render(&mut app, 60, 20).contains("progress line 39"));
+    key(&mut app, KeyCode::PageUp);
+    assert!(!render(&mut app, 60, 20).contains("progress line 39"));
+    key(&mut app, KeyCode::End);
+    assert!(render(&mut app, 60, 20).contains("progress line 39"));
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        let _ = render(&mut app, width, height);
+    }
+    wait(&mut app);
+    assert!(app.operation.is_none());
+    assert!(matches!(app.modal, Some(Modal::Result { .. })));
+    assert!(dir.path().join("progress-folder").exists());
+}
+
+#[test]
+fn progress_panel_cancels_with_f4_and_does_not_route_action_shortcuts_to_the_browser() {
+    let (_dir, mut app) = fixture();
+    key(&mut app, KeyCode::Char('a'));
+    type_text(&mut app, "fixture-folder");
+    key(&mut app, KeyCode::Enter);
+    let selected = app.browser.as_ref().unwrap().selected;
+    key(&mut app, KeyCode::Char('c'));
+    key(&mut app, KeyCode::Char('d'));
+    key(&mut app, KeyCode::Down);
+    assert!(app.transfer.is_none());
+    assert!(app.deleting.is_none());
+    assert_eq!(app.browser.as_ref().unwrap().selected, selected);
+    key(&mut app, KeyCode::F(4));
+    assert!(app.operation.as_ref().unwrap().cancelling);
+    assert!(render(&mut app, 120, 42).contains("Cancelling"));
+    key(&mut app, KeyCode::F(3));
+    assert!(app.modal.is_none());
+    key(&mut app, KeyCode::F(3));
+    assert!(matches!(app.modal, Some(Modal::Progress)));
+    wait(&mut app);
+    assert!(app.operation.is_none());
 }

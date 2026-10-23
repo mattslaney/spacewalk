@@ -557,3 +557,40 @@ fn authentication_errors_are_noninteractive_and_action_workers_can_be_cancelled(
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn git_action_reports_stdout_before_the_command_finishes() {
+    use spacewalk::git_actions::{GitActionTask, GitEvent, GitJob};
+    use std::{os::unix::fs::PermissionsExt, time::Duration};
+    let f = Fixture::new();
+    git(&f.work, &["config", "core.hooksPath", ".git/hooks"]);
+    let hook = f.work.join(".git/hooks/pre-push");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf 'Uploading fixture payload...\\n'\nsleep 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let preview = f.prepare(GitAction::Push, GitOptions::default());
+    let task = GitActionTask::start(GitJob::Execute(Box::new(preview)));
+    let mut saw_output = false;
+    loop {
+        match task.receiver.recv_timeout(Duration::from_secs(3)).unwrap() {
+            GitEvent::Progress(line) => {
+                if line.contains("Uploading fixture payload") {
+                    saw_output = true;
+                }
+            }
+            GitEvent::Finished(result) => {
+                result.unwrap();
+                assert!(
+                    saw_output,
+                    "command output was not delivered until completion"
+                );
+                break;
+            }
+            _ => panic!("unexpected event"),
+        }
+    }
+}

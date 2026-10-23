@@ -93,7 +93,7 @@ spacewalk --help
 | y | Copy the selected item's full path to the system clipboard |
 | c / x / p | Queue items for copy / cut / paste |
 | a / R | Create a folder / rename the selected item |
-| F4 | Request cancellation of a running file or Git operation |
+| F3 / F4 | Show or hide operation progress / request cancellation |
 | Ctrl+g | Open Git sync and cleanup actions |
 | t | Open a shell in the selected directory, or the parent of a selected file |
 | r | Rescan the original directory and preserve the current view where possible |
@@ -124,7 +124,9 @@ extended attributes, and hard-link relationships are not copied. Moves work acro
 filesystems; cross-filesystem moves finish the copy before removing the source.
 The scan root cannot be moved or renamed.
 
-File operations run in the background while navigation remains available. F4
+File operations open a floating progress panel showing the action, destination,
+elapsed time, and recent activity, including byte counts during large file copies.
+Esc hides the panel so you can keep browsing; F3 reopens it. F4
 requests cancellation; completed items are kept and unfinished cut items stay
 queued. The result dialog reports failures and partial completion, and disk usage
 refreshes automatically. Other mutations and shell launches wait until the operation
@@ -202,6 +204,11 @@ remain. Removing local commits does not guarantee an immediate reduction in
 `.git` storage. Nested repositories, submodules, and other worktrees are not
 recursively reset or cleaned. Bare repositories and interrupted Git operations
 are left for the shell.
+
+Git jobs open the same floating progress panel, showing the current command,
+elapsed time, and live transfer output when Git provides it. The panel follows
+new output automatically; arrows and PageUp/PageDown scroll its recent history,
+and End resumes following. Esc hides it without stopping the job; F3 reopens it.
 
 Commands run in the background using existing credentials and SSH configuration,
 without interactive password prompts. Errors and results remain in a scrollable

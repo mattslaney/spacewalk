@@ -375,6 +375,7 @@ fn copy_tree(
                     .open(&target)?;
                 let mut buffer = [0; 128 * 1024];
                 let mut length = 0;
+                let mut last_progress = Instant::now();
                 loop {
                     cancelled(cancel)?;
                     let n = input.read(&mut buffer)?;
@@ -387,6 +388,17 @@ fn copy_tree(
                         output.write_all(&buffer[..n])?;
                     }
                     length += n as u64;
+                    if last_progress.elapsed() >= Duration::from_millis(100) {
+                        progress(format!(
+                            "Copying {} · {} / {} · {}/{} entries",
+                            stamp.path.display(),
+                            crate::human_size(length),
+                            crate::human_size(stamp.len),
+                            index + 1,
+                            entries.len()
+                        ));
+                        last_progress = Instant::now();
+                    }
                 }
                 output.set_len(length)?;
                 output.set_permissions(input.metadata()?.permissions())?;

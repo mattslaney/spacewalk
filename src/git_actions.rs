@@ -217,7 +217,7 @@ impl Runner<'_> {
     }
     fn run(&self, root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
         self.check()?;
-        self.progress(format!("git {}…", args.first().unwrap_or(&"")));
+        self.progress(visible(format!("git {}", args.join(" ")).as_bytes()));
         let mut cmd = command(root);
         if matches!(args.first(), Some(&"fetch" | &"push" | &"ls-remote")) {
             // Preserve configured SSH identities/options, while preventing an unseen
@@ -248,17 +248,36 @@ impl Runner<'_> {
             format!("Cannot start Git: {e}. Use the shell to check your Git installation.")
         })?;
         let mut stdout = child.stdout.take().unwrap();
+        let stream_stdout = matches!(
+            args.first(),
+            Some(&"fetch" | &"push" | &"merge" | &"reset" | &"clean" | &"branch")
+        );
+        let recent_stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let worker_stdout = Arc::clone(&recent_stdout);
         let (stdout_sender, stdout_receiver) = mpsc::channel();
         thread::spawn(move || {
             let result = (|| -> Result<Vec<u8>, String> {
                 let mut bytes = Vec::new();
-                stdout
-                    .by_ref()
-                    .take((OUTPUT_LIMIT + 1) as u64)
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| e.to_string())?;
-                if bytes.len() > OUTPUT_LIMIT {
-                    return Err("Git output is too large to preview safely; use the shell".into());
+                let mut buffer = [0; 8192];
+                loop {
+                    let count = stdout.read(&mut buffer).map_err(|e| e.to_string())?;
+                    if count == 0 {
+                        break;
+                    }
+                    if bytes.len() + count > OUTPUT_LIMIT {
+                        return Err(
+                            "Git output is too large to preview safely; use the shell".into()
+                        );
+                    }
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if stream_stdout {
+                        let mut recent = worker_stdout.lock().unwrap();
+                        recent.extend_from_slice(&buffer[..count]);
+                        if recent.len() > 8192 {
+                            let excess = recent.len() - 8192;
+                            recent.drain(..excess);
+                        }
+                    }
                 }
                 Ok(bytes)
             })();
@@ -285,6 +304,8 @@ impl Runner<'_> {
         });
         let deadline = Instant::now() + Duration::from_secs(300);
         let mut last_progress = Instant::now();
+        let mut last_stdout = Vec::new();
+        let mut last_stderr = Vec::new();
         let result = loop {
             if self.cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 stop_child(&mut child);
@@ -294,15 +315,21 @@ impl Runner<'_> {
                 Ok(Some(status)) => break Ok(status),
                 Ok(None) => {
                     if last_progress.elapsed() >= Duration::from_millis(250) {
-                        let output = stderr.lock().unwrap();
-                        if !output.is_empty() {
-                            self.progress(
-                                visible(&output)
-                                    .lines()
-                                    .last()
-                                    .unwrap_or("Working…")
-                                    .to_owned(),
-                            );
+                        for (buffer, previous) in [
+                            (&recent_stdout, &mut last_stdout),
+                            (&stderr, &mut last_stderr),
+                        ] {
+                            let output = buffer.lock().unwrap();
+                            if !output.is_empty() && *output != *previous {
+                                self.progress(
+                                    visible(&output)
+                                        .lines()
+                                        .last()
+                                        .unwrap_or("Working…")
+                                        .to_owned(),
+                                );
+                                previous.clone_from(&output);
+                            }
                         }
                         last_progress = Instant::now();
                     }
@@ -633,6 +660,7 @@ fn prepare_with(
             &root,
             &[
                 "fetch",
+                "--progress",
                 "--no-tags",
                 "--no-prune-tags",
                 "--no-recurse-submodules",
@@ -891,7 +919,7 @@ fn execute_with(preview: &GitPreview, runner: &Runner<'_>) -> Result<String, Str
                 "--force-with-lease={}:{}",
                 upstream.remote_ref, preview.remote_expected
             );
-            let mut args = vec!["push", "--porcelain"];
+            let mut args = vec!["push", "--porcelain", "--progress"];
             if preview.options.force {
                 args.push(&lease);
             }

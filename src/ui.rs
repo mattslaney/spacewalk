@@ -298,10 +298,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.file_task.is_some() || app.git_action.is_some() {
         frame.render_widget(
             Paragraph::new(format!(
-                " {} · F4 cancel",
+                " {} · F3 progress · F4 cancel",
                 truncate(
                     &display_name(std::ffi::OsStr::new(&app.operation_status)),
-                    area.width.saturating_sub(15) as usize
+                    area.width.saturating_sub(29) as usize
                 )
             ))
             .style(Style::default().fg(WARN)),
@@ -664,7 +664,12 @@ fn draw_modal(frame: &mut Frame, app: &App) {
     let Some(modal) = app.modal.as_ref() else {
         return;
     };
+    if matches!(modal, Modal::Progress) {
+        draw_progress(frame, app);
+        return;
+    }
     let (title, text, warning) = match modal {
+        Modal::Progress => unreachable!(),
         Modal::GitPanel(panel) => {
             let repo = &panel.repository;
             let enabled = |value| if value { "x" } else { " " };
@@ -750,7 +755,7 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git sync and cleanup panel\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F3                Show / hide operation progress\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git sync and cleanup panel\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),
@@ -873,4 +878,104 @@ fn draw_modal(frame: &mut Frame, app: &App) {
             Rect::new(inside.x, rect.bottom() - 2, inside.width, 1),
         );
     }
+}
+
+fn draw_progress(frame: &mut Frame, app: &App) {
+    let Some(operation) = &app.operation else {
+        return;
+    };
+    let area = frame.area();
+    let width = area.width.saturating_sub(6).min(96);
+    let height = area.height.saturating_sub(4).min(26);
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(" OPERATION PROGRESS ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(if operation.cancelling { WARN } else { ACCENT }))
+        .style(Style::default().bg(PANEL).fg(TEXT));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let inner = Rect::new(
+        inner.x + 1,
+        inner.y,
+        inner.width.saturating_sub(2),
+        inner.height,
+    );
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(truncate(&operation.title, inner.width as usize))
+            .style(Style::default().fg(ACCENT).bold()),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(operation.context.as_str())
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(MUTED)),
+        rows[1],
+    );
+    let elapsed = operation.started.elapsed();
+    let spinner = ['|', '/', '—', '\\'][(elapsed.as_millis() / 200 % 4) as usize];
+    let status = if operation.cancelling {
+        "Cancelling; waiting for a safe stop"
+    } else {
+        "Running"
+    };
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{spinner} {status} · {:02}:{:02} elapsed",
+            elapsed.as_secs() / 60,
+            elapsed.as_secs() % 60
+        ))
+        .style(Style::default().fg(WARN)),
+        rows[2],
+    );
+    let log_block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(EDGE));
+    let log_area = log_block.inner(rows[3]);
+    frame.render_widget(log_block, rows[3]);
+    let mut lines = Vec::new();
+    for message in &operation.lines {
+        let mut line = String::new();
+        let mut used = 0;
+        for ch in message.chars() {
+            let width = ch.width().unwrap_or(0);
+            if used + width > log_area.width as usize && !line.is_empty() {
+                lines.push(Line::from(std::mem::take(&mut line)));
+                used = 0;
+            }
+            line.push(ch);
+            used += width;
+        }
+        lines.push(Line::from(line));
+    }
+    let end = lines
+        .len()
+        .saturating_sub(operation.scrollback.min(lines.len().saturating_sub(1)));
+    let start = end.saturating_sub(log_area.height as usize);
+    frame.render_widget(
+        Paragraph::new(lines[start..end].to_vec()).style(Style::default().fg(TEXT)),
+        log_area,
+    );
+    frame.render_widget(
+        Paragraph::new(
+            "Esc hide · F3 reopen · F4 cancel\n↑↓ / PgUp/PgDn scroll · End follow latest",
+        )
+        .style(Style::default().fg(MUTED)),
+        rows[4],
+    );
 }

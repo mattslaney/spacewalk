@@ -8,6 +8,7 @@ use crate::{
     },
     git::{GitTask, RepoState},
     git_actions::{GitAction, GitActionTask, GitEvent, GitJob, GitOptions, GitPreview, Repository},
+    operation::OperationProgress,
     scan::{Identity, Kind, Options, Progress, ScanEvent, ScanTask, Snapshot},
     shell::ShellRequest,
     treemap::Direction,
@@ -36,6 +37,7 @@ pub enum Modal {
     Result { title: String, text: String },
     GitPanel(GitPanel),
     GitPreview(Box<GitPreview>),
+    Progress,
 }
 
 pub struct GitPanel {
@@ -221,6 +223,7 @@ pub struct App {
     pub file_task: Option<FileTask>,
     pub git_action: Option<GitActionTask>,
     pub operation_status: String,
+    pub operation: Option<OperationProgress>,
     select_after_scan: Option<PathBuf>,
     status_expires: Option<Instant>,
     exit_after_delete: bool,
@@ -251,6 +254,7 @@ impl App {
             file_task: None,
             git_action: None,
             operation_status: String::new(),
+            operation: None,
             select_after_scan: None,
             status_expires: None,
             exit_after_delete: false,
@@ -323,10 +327,11 @@ impl App {
             };
             changed = true;
             match event {
-                GitEvent::Progress(text) => self.operation_status = text,
+                GitEvent::Progress(text) => self.report_progress(text),
                 event => {
                     self.git_action = None;
                     self.operation_status.clear();
+                    self.operation = None;
                     self.modal_scroll = 0;
                     match event {
                         GitEvent::Inspected(Ok(repository)) => {
@@ -373,7 +378,7 @@ impl App {
             };
             changed = true;
             match event {
-                FileEvent::Progress(text) => self.operation_status = text,
+                FileEvent::Progress(text) => self.report_progress(text),
                 FileEvent::Finished(result) => {
                     self.file_task = None;
                     if let Some(queue) = self.transfer.as_mut()
@@ -396,6 +401,7 @@ impl App {
                         "File operation complete. Disk usage refreshed.".into()
                     };
                     self.operation_status.clear();
+                    self.operation = None;
                     self.modal = Some(Modal::Result {
                         title: " FILE OPERATION ".into(),
                         text,
@@ -496,6 +502,9 @@ impl App {
                 _ => break,
             }
         }
+        if let Some(operation) = self.operation.as_mut() {
+            changed |= operation.tick();
+        }
         changed | self.expire_status(Instant::now())
     }
 
@@ -528,14 +537,10 @@ impl App {
     }
 
     fn quit(&mut self) {
-        if let Some(task) = &self.git_action {
-            task.cancel();
+        if self.git_action.is_some() || self.file_task.is_some() {
+            self.cancel_operation();
             self.exit_after_delete = true;
-            self.set_status("Waiting for Git to stop before exit…");
-        } else if let Some(task) = &self.file_task {
-            task.cancel();
-            self.exit_after_delete = true;
-            self.set_status("Finishing file operation before exit…");
+            self.set_status("Waiting for the operation to stop before exit…");
         } else if self.deleting.is_some() {
             self.exit_after_delete = true;
             self.set_status("Finishing deletion before exit…");
@@ -550,6 +555,48 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit();
+            return;
+        }
+        if key.kind == KeyEventKind::Press && key.code == KeyCode::F(3) && self.operation.is_some()
+        {
+            self.modal = if matches!(self.modal, Some(Modal::Progress)) {
+                None
+            } else {
+                Some(Modal::Progress)
+            };
+            return;
+        }
+        if key.kind == KeyEventKind::Press && key.code == KeyCode::F(4) && self.operation.is_some()
+        {
+            self.cancel_operation();
+            return;
+        }
+        if matches!(self.modal, Some(Modal::Progress)) {
+            match key.code {
+                KeyCode::Esc => self.modal = None,
+                KeyCode::Char('q') => self.quit(),
+                code => {
+                    if let Some(operation) = self.operation.as_mut() {
+                        match code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                operation.scrollback = operation.scrollback.saturating_add(1)
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                operation.scrollback = operation.scrollback.saturating_sub(1)
+                            }
+                            KeyCode::PageUp => {
+                                operation.scrollback = operation.scrollback.saturating_add(10)
+                            }
+                            KeyCode::PageDown => {
+                                operation.scrollback = operation.scrollback.saturating_sub(10)
+                            }
+                            KeyCode::Home => operation.scrollback = 10000,
+                            KeyCode::End => operation.scrollback = 0,
+                            _ => {}
+                        }
+                    }
+                }
+            }
             return;
         }
         if matches!(self.modal, Some(Modal::FileInput(_))) {
@@ -691,20 +738,6 @@ impl App {
         if key.code == KeyCode::Esc && self.transfer.is_some() {
             self.transfer = None;
             self.notify("Files: transfer queue cleared");
-            return;
-        }
-        if key.code == KeyCode::F(4)
-            && let Some(task) = &self.file_task
-        {
-            task.cancel();
-            self.operation_status = "Cancelling at a safe boundary…".into();
-            return;
-        }
-        if key.code == KeyCode::F(4)
-            && let Some(task) = &self.git_action
-        {
-            task.cancel();
-            self.operation_status = "Stopping Git; completed steps are kept…".into();
             return;
         }
         match key.code {
@@ -868,10 +901,48 @@ impl App {
     }
 
     fn start_git_job(&mut self, job: GitJob) {
+        let (title, context) = match &job {
+            GitJob::Inspect(path) => ("Inspect repository".into(), display_name(path.as_os_str())),
+            GitJob::Preview { path, action, .. } => (
+                format!("Prepare {} preview", action.label()),
+                display_name(path.as_os_str()),
+            ),
+            GitJob::Execute(preview) => (
+                preview.action.label().into(),
+                display_name(preview.repository.root.as_os_str()),
+            ),
+        };
         self.git = None;
-        self.modal = None;
-        self.operation_status = "Preparing Git action…".into();
+        self.begin_operation(title, context, "Preparing Git action…");
         self.git_action = Some(GitActionTask::start(job));
+    }
+
+    fn begin_operation(&mut self, title: String, context: String, message: &str) {
+        self.operation = Some(OperationProgress::new(title, context));
+        self.report_progress(message.into());
+        self.modal = Some(Modal::Progress);
+    }
+
+    fn report_progress(&mut self, message: String) {
+        self.operation_status = crate::git_actions::visible(message.as_bytes());
+        if let Some(operation) = self.operation.as_mut() {
+            operation.record(&self.operation_status);
+        }
+    }
+
+    fn cancel_operation(&mut self) {
+        if let Some(task) = &self.file_task {
+            task.cancel();
+        }
+        if let Some(task) = &self.git_action {
+            task.cancel();
+        }
+        if let Some(operation) = self.operation.as_mut() {
+            operation.cancelling = true;
+        }
+        self.report_progress(
+            "Cancellation requested; waiting for a safe stop. Completed steps are kept.".into(),
+        );
     }
 
     fn open_git_panel(&mut self) {
@@ -1068,10 +1139,27 @@ impl App {
         if key.code == KeyCode::Enter && key.kind == KeyEventKind::Press {
             match input.request() {
                 Ok(request) => {
+                    let (title, context) = match &request {
+                        FileRequest::Paste { queue, destination } => (
+                            format!("{} {} items", queue.mode.label(), queue.items.len()),
+                            display_name(destination.path.as_os_str()),
+                        ),
+                        FileRequest::Create { parent, name } => (
+                            "Create folder".into(),
+                            display_name(parent.path.join(name).as_os_str()),
+                        ),
+                        FileRequest::Rename { item, parent, name } => (
+                            "Rename item".into(),
+                            format!(
+                                "{} → {}",
+                                display_name(item.path.as_os_str()),
+                                display_name(parent.path.join(name).as_os_str())
+                            ),
+                        ),
+                    };
                     self.file_task = Some(FileTask::start(request));
                     self.git = None;
-                    self.operation_status = "Checking file operation…".into();
-                    self.modal = None;
+                    self.begin_operation(title, context, "Checking file operation…");
                 }
                 Err(error) => input.error = Some(error.to_string()),
             }
