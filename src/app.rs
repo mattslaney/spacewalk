@@ -233,6 +233,7 @@ pub struct App {
     pub operation_status: String,
     pub operation: Option<OperationProgress>,
     git_panel_return: Option<GitPanel>,
+    worktree_panel_return: Option<GitPanel>,
     pub worktrees: Option<WorktreeManager>,
     pub worktree_scan: Option<WorktreeScanTask>,
     select_after_scan: Option<PathBuf>,
@@ -267,6 +268,7 @@ impl App {
             operation_status: String::new(),
             operation: None,
             git_panel_return: None,
+            worktree_panel_return: None,
             worktrees: None,
             worktree_scan: None,
             select_after_scan: None,
@@ -284,6 +286,7 @@ impl App {
             self.set_status("Scanning directory…");
         }
         self.git = None;
+        self.pause_worktree_scan();
         self.scanning = Some(ScanTask::start(self.root.clone(), self.options));
         self.progress = Progress::default();
         self.started = Instant::now();
@@ -359,7 +362,11 @@ impl App {
                     WorktreeEvent::Measured(row) => manager.update(*row),
                     WorktreeEvent::Done => {
                         manager.loading = false;
-                        manager.message = "Checkout usage includes ignored files; shared Git metadata excluded. Upstream state uses last-fetched refs.".into();
+                        manager.message = if manager.rows.is_empty() {
+                            "No linked worktrees. The primary repository is managed in the Git menu."
+                        } else {
+                            "Checkout usage includes ignored files; shared Git metadata excluded. Upstream state uses last-fetched refs."
+                        }.into();
                         self.worktree_scan = None;
                         break;
                     }
@@ -613,6 +620,9 @@ impl App {
         };
         self.browser = Some(b);
         self.last_click = None;
+        if matches!(self.modal, Some(Modal::Worktrees)) {
+            self.refresh_worktrees();
+        }
     }
 
     fn quit(&mut self) {
@@ -708,8 +718,8 @@ impl App {
                     }
                 }
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n' | 'q') => {
-                    self.return_to_worktrees();
                     self.rescan();
+                    self.return_to_worktrees();
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.modal_scroll = self.modal_scroll.saturating_add(1)
@@ -814,17 +824,6 @@ impl App {
             && key.code == KeyCode::Char('g')
         {
             self.open_git_panel();
-            return;
-        }
-        if key.kind == KeyEventKind::Press
-            && key.code == KeyCode::Char('w')
-            && !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            if let Some(path) = self.selected_directory() {
-                self.open_worktrees(path);
-            }
             return;
         }
         if key.kind == KeyEventKind::Press
@@ -1101,11 +1100,12 @@ impl App {
         }
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
             self.return_to_worktrees();
-            self.rescan();
             return;
         }
         if key.code == KeyCode::Char('w') {
-            if let Some(Modal::GitPanel(panel)) = &self.modal {
+            if self.worktrees.is_some() {
+                self.return_to_worktrees();
+            } else if let Some(Modal::GitPanel(panel)) = &self.modal {
                 let path = panel.repository.root.clone();
                 self.open_worktrees(path);
             }
@@ -1188,6 +1188,13 @@ impl App {
             _ => None,
         };
         if let Some(action) = action {
+            if panel.repository.bare {
+                panel.error = Some(
+                    "Select a checkout in w Worktree manager for Pull, Push, Clean or Reset."
+                        .into(),
+                );
+                return;
+            }
             let needs_remote = action != GitAction::Clean || panel.options.discard_commits;
             if panel.repository.head.is_none() {
                 panel.error = Some("No commits yet; use the shell first.".into());
@@ -1209,19 +1216,6 @@ impl App {
         }
     }
 
-    fn selected_directory(&self) -> Option<PathBuf> {
-        let b = self.browser.as_ref()?;
-        if b.rows.is_empty() {
-            return None;
-        }
-        let path = b.data.path(b.selected);
-        Some(if b.data.nodes[b.selected].kind == Kind::Directory {
-            path
-        } else {
-            path.parent().unwrap_or(&b.data.root).to_path_buf()
-        })
-    }
-
     fn worktree_home(&self) -> Option<Modal> {
         self.worktrees.as_ref().map(|_| Modal::Worktrees)
     }
@@ -1234,7 +1228,12 @@ impl App {
     }
 
     fn refresh_worktrees(&mut self) {
-        if self.git_action.is_some() || self.file_task.is_some() || self.deleting.is_some() {
+        if !matches!(self.modal, Some(Modal::Worktrees))
+            || self.scanning.is_some()
+            || self.git_action.is_some()
+            || self.file_task.is_some()
+            || self.deleting.is_some()
+        {
             return;
         }
         if let Some(manager) = self.worktrees.as_mut() {
@@ -1263,8 +1262,13 @@ impl App {
             return;
         }
         self.worktrees = Some(WorktreeManager::new(path.clone()));
+        self.worktree_panel_return = match self.modal.take() {
+            Some(Modal::GitPanel(panel)) => Some(panel),
+            _ => None,
+        };
         self.worktree_scan = Some(WorktreeScanTask::start(path, self.options));
         self.modal = Some(Modal::Worktrees);
+        self.modal_scroll = 0;
     }
 
     fn worktree_action_key(&mut self, key: KeyEvent) {
@@ -1341,7 +1345,8 @@ impl App {
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
             self.worktree_scan = None;
             self.worktrees = None;
-            self.modal = None;
+            self.modal = self.worktree_panel_return.take().map(Modal::GitPanel);
+            self.modal_scroll = 0;
             return;
         }
         if key.kind == KeyEventKind::Press
@@ -1359,8 +1364,8 @@ impl App {
                     "Wait for the current operation before changing worktrees.".into();
                 return;
             }
-            if manager.rows.is_empty() {
-                manager.message = "Wait for worktree registrations to load.".into();
+            if manager.rows.is_empty() && (manager.loading || key.code != KeyCode::Char('p')) {
+                manager.message = "No linked worktree selected; wait for registrations to load or return to the Git menu.".into();
                 return;
             }
             if key.code == KeyCode::Char('p') {

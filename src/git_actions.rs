@@ -80,6 +80,7 @@ pub struct Upstream {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repository {
     pub root: PathBuf,
+    pub bare: bool,
     pub branch: Option<String>,
     pub head: Option<String>,
     pub upstream: Option<Upstream>,
@@ -182,7 +183,7 @@ impl GitActionTask {
                 GitJob::Inspect(path) => GitEvent::Inspected(inspect_with(&path, &runner)),
                 GitJob::Report { path, command } => GitEvent::Reported {
                     command,
-                    result: report_with(&path, command, &runner),
+                    result: inspect_root(&path, &runner).and_then(|_| report_with(&path, command, &runner)),
                 },
                 GitJob::InspectCheckout(path) => GitEvent::Inspected(inspect_checkout(&path, &runner)),
                 GitJob::Preview { path, action, options } => GitEvent::Previewed(inspect_checkout(&path, &runner).and_then(|_| prepare_with(&path, action, options, &runner)).map(Box::new)),
@@ -515,15 +516,18 @@ fn path_from_output(mut bytes: Vec<u8>) -> PathBuf {
 }
 
 fn inspect_with(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> {
-    let root = path_from_output(
-        runner
-            .run(path, &["rev-parse", "--show-toplevel"])
-            .map_err(|e| {
-                format!(
-                    "Select a working-tree repository. Bare repositories are not supported.\n{e}"
-                )
-            })?,
-    );
+    let bare = runner.text(path, &["rev-parse", "--is-bare-repository"])? == "true";
+    let root = path_from_output(runner.run(
+        path,
+        &[
+            "rev-parse",
+            if bare {
+                "--absolute-git-dir"
+            } else {
+                "--show-toplevel"
+            },
+        ],
+    )?);
     let branch = runner
         .text(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .ok();
@@ -558,17 +562,26 @@ fn inspect_with(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> 
     };
     Ok(Repository {
         root,
+        bare,
         branch,
         head,
         upstream,
     })
 }
 
-pub(crate) fn inspect_checkout(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> {
+fn inspect_root(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> {
     let repo = inspect_with(path, runner)?;
     let expected = path.canonicalize().map_err(|e| e.to_string())?;
     if repo.root != expected {
         return Err("The selected checkout no longer matches its registered root; refresh or repair it in the shell".into());
+    }
+    Ok(repo)
+}
+
+pub(crate) fn inspect_checkout(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> {
+    let repo = inspect_root(path, runner)?;
+    if repo.bare {
+        return Err("This action needs a checkout; select one in the worktree manager.".into());
     }
     Ok(repo)
 }
@@ -616,6 +629,9 @@ pub fn report(path: &Path, command: GitCommand, cancel: &AtomicBool) -> Result<S
 
 fn report_with(path: &Path, command: GitCommand, runner: &Runner<'_>) -> Result<String, String> {
     let repo = inspect_with(path, runner)?;
+    if repo.bare && matches!(command, GitCommand::Status | GitCommand::Diff) {
+        return Err("A bare repository has no checkout for Status or Diff. Select one in w Worktree manager.".into());
+    }
     let root = &repo.root;
     let mut text = format!(
         "Repository: {}\nBranch: {}\n\n",
@@ -702,8 +718,13 @@ fn report_with(path: &Path, command: GitCommand, runner: &Runner<'_>) -> Result<
                     ],
                 )?;
                 text.push_str("Fetch complete. Remote comparisons have been refreshed.\n\n");
+                let args: &[&str] = if repo.bare {
+                    &["branch", "--list", "-vv", "--no-color"]
+                } else {
+                    &["status", "--short", "--branch"]
+                };
                 text.push_str(&report_output(
-                    &runner.run(root, &["status", "--short", "--branch"])?,
+                    &runner.run(root, args)?,
                     "Clean working tree.",
                 ));
             }
@@ -880,6 +901,9 @@ fn prepare_with(
     runner: &Runner<'_>,
 ) -> Result<GitPreview, String> {
     let mut repo = inspect_with(path, runner)?;
+    if repo.bare {
+        return Err("Bare repositories need a checkout for this action; select one in the worktree manager.".into());
+    }
     let root = repo.root.clone();
     let head = repo
         .head

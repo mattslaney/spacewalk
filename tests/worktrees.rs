@@ -200,6 +200,10 @@ fn supports_bare_hubs_and_nul_delimited_unusual_paths() {
     let registry = worktrees::discover(&hub, &AtomicBool::new(false)).unwrap();
     assert!(registry.records[0].bare);
     assert_eq!(registry.common_dir, hub);
+    let mut manager = WorktreeManager::new(hub.clone());
+    manager.apply_registry(registry);
+    assert_eq!(manager.rows.len(), 1);
+    assert_eq!(manager.rows[0].record.path, linked);
     let records = worktrees::parse_list(b"worktree /tmp/one\nwith newline\0HEAD abc\0branch refs/heads/topic\0locked custom\nreason\0\0worktree /tmp/missing\0detached\0prunable missing gitdir\0\0").unwrap();
     assert_eq!(records[0].path, PathBuf::from("/tmp/one\nwith newline"));
     assert_eq!(records[0].locked.as_deref(), Some("custom\nreason"));
@@ -209,11 +213,21 @@ fn supports_bare_hubs_and_nul_delimited_unusual_paths() {
 #[test]
 fn sorting_keeps_selection_and_marks_bound_to_paths() {
     let f = Fixture::new();
+    let second = f.temp.path().join("second");
+    git(
+        &f.main,
+        &["worktree", "add", "-b", "second", second.to_str().unwrap()],
+    );
     let registry = worktrees::discover(&f.main, &AtomicBool::new(false)).unwrap();
     let mut manager = WorktreeManager::new(f.linked.clone());
     manager.apply_registry(registry.clone());
     manager.marked.insert(f.linked.clone());
-    for (record, bytes) in registry.records.into_iter().zip([100, 500]) {
+    for (record, bytes) in registry
+        .records
+        .into_iter()
+        .filter(|record| !record.main)
+        .zip([500, 100])
+    {
         let mut row = WorktreeRow::pending(record);
         row.bytes = Some(bytes);
         manager.update(row);
@@ -222,7 +236,7 @@ fn sorting_keeps_selection_and_marks_bound_to_paths() {
     assert_eq!(manager.selected, f.linked);
     assert!(manager.marked.contains(&f.linked));
     manager.move_selection(1);
-    assert_eq!(manager.selected, f.main);
+    assert_eq!(manager.selected, second);
 }
 
 #[cfg(unix)]
@@ -673,4 +687,34 @@ fn unavailable_directory_contents_are_reported_as_partial_usage() {
         assert!(row.scan_errors > 0);
         assert!(row.bytes.is_some());
     }
+}
+
+#[test]
+fn inventory_worker_keeps_primary_registration_but_does_not_measure_or_list_it() {
+    use worktrees::{WorktreeEvent, WorktreeScanTask};
+    let f = Fixture::new();
+    let task = WorktreeScanTask::start(f.main.clone(), Options::default());
+    let mut manager = WorktreeManager::new(f.main.clone());
+    let mut measured = Vec::new();
+    loop {
+        match task
+            .receiver
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+        {
+            WorktreeEvent::Listed(Ok(registry)) => {
+                assert!(registry.records.iter().any(|record| record.main));
+                manager.apply_registry(registry);
+            }
+            WorktreeEvent::Listed(Err(error)) => panic!("{error}"),
+            WorktreeEvent::Measured(row) => {
+                measured.push(row.record.path.clone());
+                manager.update(*row);
+            }
+            WorktreeEvent::Done => break,
+        }
+    }
+    assert_eq!(measured, vec![f.linked.clone()]);
+    assert_eq!(manager.rows.len(), 1);
+    assert_eq!(manager.selected, f.linked);
 }

@@ -94,8 +94,7 @@ spacewalk --help
 | c / x / p | Queue items for copy / cut / paste |
 | a / R | Create a folder / rename the selected item |
 | F3 / F4 | Show or hide operation progress / request cancellation |
-| Ctrl+g | Open Git sync and cleanup actions |
-| w | Open the selected repository’s worktree inventory |
+| Ctrl+g | Open Git reports, sync, cleanup and worktree management |
 | t | Open a shell in the selected directory, or the parent of a selected file |
 | r | Rescan the original directory and preserve the current view where possible |
 | h | Hide / show the selected file or directory in the treemap |
@@ -176,6 +175,7 @@ The panel shows the repository, current branch, and configured upstream.
 | u | Show Local commits: current-branch commits absent from its last-fetched upstream |
 | z | List repository-wide Stashes |
 | F | Fetch configured remotes and refresh Git indicators |
+| w | Open the repository’s worktree manager |
 | p / P | Preview Pull / Push |
 | c | Preview Clean checkout |
 | r | Preview Reset to remote |
@@ -236,14 +236,20 @@ close the panel and press `t` to open the shell.
 
 ## Worktree management
 
-Press `w` on a repository or an item inside it, or from the Git action panel, to
-list all its registered worktrees. This includes checkouts outside the scanned
-directory and worktrees attached to a bare repository hub. Sizes update in the
-background, largest first, and include ignored dependencies and build output.
+Press `Ctrl+g` on a repository or an item inside it, then `w` in the Git menu to
+list its registered linked worktrees. Esc returns to the Git menu.
+The primary checkout or bare hub is kept in the Git menu and is neither listed
+nor measured here. The list includes linked checkouts outside the scanned directory.
+Bare hubs also open through `Ctrl+g`; checkout actions are available by selecting
+a worktree. Sizes update in the background, largest first, and include ignored
+dependencies and build output.
 Shared Git metadata is excluded from checkout sizes. Partial scans and unavailable
 paths are marked; reported usage is not a guarantee of space that can be freed.
+Worktree discovery and size measurements run only when this manager is opened,
+never during the initial directory scan. Measurements pause during rescans and
+Git jobs, then refresh when returning to the list.
 
-The view shows branch or detached HEAD, main/locked/prunable flags, local changes,
+The view shows branch or detached HEAD, locked/prunable flags, local changes,
 and upstream state from last-fetched references. It does not fetch automatically.
 Use arrows to select, `m`/`M` to mark or clear marks, `y` to copy a path, `t` to
 open a shell, and `r` to refresh. Enter opens the usual Pull, Push, Clean checkout,

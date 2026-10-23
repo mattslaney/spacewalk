@@ -272,7 +272,13 @@ impl WorktreeScanTask {
             {
                 return;
             }
-            for record in registry.records {
+            // Keep the full registry for safety checks, but only measure linked
+            // checkouts. The primary checkout / bare hub has its own Git menu.
+            for record in registry
+                .records
+                .into_iter()
+                .filter(|record| !record.main && !record.bare)
+            {
                 if worker_cancel.load(Ordering::Relaxed) {
                     return;
                 }
@@ -335,6 +341,7 @@ impl WorktreeManager {
         self.rows = registry
             .records
             .into_iter()
+            .filter(|record| !record.main && !record.bare)
             .map(WorktreeRow::pending)
             .collect();
         self.rows.extend(leftovers);

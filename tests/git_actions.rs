@@ -399,7 +399,7 @@ fn force_lease_rejects_remote_changes_after_preview() {
 }
 
 #[test]
-fn discovery_works_inside_repo_and_missing_upstream_detached_and_bare_fail_clearly() {
+fn discovery_supports_bare_hubs_but_checkout_actions_require_a_checkout() {
     let f = Fixture::new();
     fs::create_dir(f.work.join("sub")).unwrap();
     assert_eq!(
@@ -432,8 +432,18 @@ fn discovery_works_inside_repo_and_missing_upstream_detached_and_bare_fail_clear
     );
     assert!(
         git_actions::inspect(&f.remote, &AtomicBool::new(false))
-            .unwrap_err()
-            .contains("Bare")
+            .unwrap()
+            .bare
+    );
+    assert!(
+        git_actions::prepare(
+            &f.remote,
+            GitAction::Clean,
+            GitOptions::default(),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("Bare")
     );
 }
 
