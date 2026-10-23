@@ -2020,3 +2020,71 @@ fn git_status_uses_colors_and_shell_returns_to_the_same_git_context() {
         matches!(&app.modal, Some(Modal::GitPanel(p)) if p.report.is_none() && p.options.force)
     );
 }
+
+#[test]
+fn git_home_leads_with_local_risk_and_cleanup_consequences_and_refreshes_locally() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let remote = tempfile::tempdir().unwrap();
+    git_ui(remote.path(), &["init", "--bare", "--initial-branch=main"]);
+    git_ui(
+        dir.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git_ui(dir.path(), &["push", "-u", "origin", "main"]);
+    git_ui(dir.path(), &["commit", "--allow-empty", "-m", "local"]);
+    git_ui(dir.path(), &["branch", "alias-one"]);
+    git_ui(dir.path(), &["branch", "alias-two"]);
+    fs::write(dir.path().join("notes.txt"), "saved work").unwrap();
+    git_ui(dir.path(), &["stash", "push", "-m", "saved"]);
+    fs::write(dir.path().join("notes.txt"), "uncommitted").unwrap();
+    fs::write(dir.path().join("scratch"), "local file").unwrap();
+    fs::write(dir.path().join(".git/info/exclude"), "cache/\nlocal.env\n").unwrap();
+    fs::create_dir(dir.path().join("cache")).unwrap();
+    fs::write(dir.path().join("cache/output"), "build output").unwrap();
+    fs::write(dir.path().join("local.env"), "private settings").unwrap();
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    let screen = render(&mut app, 120, 42);
+    assert!(screen.find("LOCAL WORK TO REVIEW").unwrap() < screen.find("RECLAIM SPACE").unwrap());
+    assert!(
+        screen.find("RECLAIM SPACE").unwrap() < screen.find("DETAILS / PRESERVE FIRST").unwrap()
+    );
+    for text in [
+        "1 untracked · 2 ignored items",
+        "Commits absent from fetched refs: 1",
+        "Branches without remote upstream: 2 · Stashes: 1",
+        "Clean keeps local commits",
+        "Reset: also discards",
+    ] {
+        assert!(screen.contains(text), "Missing {text}");
+    }
+    let small = render(&mut app, 80, 24);
+    for text in [
+        "LOCAL WORK TO REVIEW",
+        "RECLAIM SPACE",
+        "c Clean checkout",
+        "1 untracked",
+        "Stashes: 1",
+    ] {
+        assert!(small.contains(text), "Missing {text} at 80x24");
+    }
+    key(&mut app, KeyCode::Char('l'));
+    let screen = render(&mut app, 120, 42);
+    assert!(screen.contains("Clean option ON: DELETE"));
+    git_ui(
+        dir.path(),
+        &["remote", "set-url", "origin", "/missing/no-network.git"],
+    );
+    git_ui(
+        dir.path(),
+        &["update-ref", "-d", "refs/remotes/origin/main"],
+    );
+    key(&mut app, KeyCode::Char('R'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.options.discard_commits && !panel.summary.as_ref().unwrap().has_remote_refs)
+    );
+    assert!(render(&mut app, 120, 42).contains("UNVERIFIED"));
+}

@@ -667,6 +667,8 @@ fn styled_panel_line(line: String) -> Line<'static> {
         || lower.contains("error:")
         || line.contains("permanently")
         || line.contains("Force: ON")
+        || line.contains("UNVERIFIED")
+        || line.contains("UNKNOWN")
     {
         return Line::styled(line, Style::default().fg(WARN).bold());
     }
@@ -674,7 +676,17 @@ fn styled_panel_line(line: String) -> Line<'static> {
         return Line::styled(line, Style::default().fg(ACCENT));
     }
     if let Some((label, value)) = line.split_once(": ") {
-        let color = if value == "CLEAN" || ((label == "Ahead" || label == "Behind") && value == "0")
+        let color = if value.starts_with("REVIEW") {
+            WARN
+        } else if label == "Commits absent from fetched refs" {
+            if value.starts_with("0 ") {
+                ACCENT
+            } else {
+                WARN
+            }
+        } else if value.starts_with("CLEAN")
+            || value == "none"
+            || ((label == "Ahead" || label == "Behind") && value == "0")
         {
             ACCENT
         } else if (label == "Ahead" || label == "Behind") && value != "unknown" {
@@ -938,42 +950,116 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
                 "Primary repository"
             };
             let worktree_action = if repo.linked_worktree {
-                "\nD Delete this worktree (preview first)\n"
+                "D Delete this worktree (preview first)\n"
             } else {
                 ""
             };
-            let enabled = |value| if value { "x" } else { " " };
-            let commands = if repo.bare {
-                "w Worktree manager\nv Branches · u Local commits · z Stashes · F Fetch\n\nBare repository: select a checkout in the worktree manager\nfor Status, Pull, Push, Clean or Reset."
-            } else {
-                "w Worktree manager\ni Status · v Branches · u Local commits · z Stashes\nF Fetch remotes and refresh comparisons\n\np Pull · P Push · c Clean checkout · r Reset to remote"
+            let summary = match &panel.summary {
+                Ok(summary) => {
+                    let files = if let Some(files) = &summary.files {
+                        format!(
+                            "Checkout: {} ({} staged · {} modified)\nFiles outside Git: {}\n",
+                            if files.dirty() { "DIRTY" } else { "CLEAN" },
+                            files.staged,
+                            files.modified,
+                            if files.untracked == 0 && summary.ignored_items == 0 {
+                                "none".into()
+                            } else {
+                                format!(
+                                    "REVIEW — {} untracked · {} ignored items",
+                                    files.untracked, summary.ignored_items
+                                )
+                            }
+                        )
+                    } else {
+                        "Checkout: none (bare repository)\n".into()
+                    };
+                    let upstream = repo.upstream.as_ref().map_or_else(
+                        || "not configured — ahead/behind unknown".into(),
+                        |upstream| {
+                            format!(
+                                "{} · ↑{} ↓{}",
+                                upstream
+                                    .tracking_ref
+                                    .strip_prefix("refs/remotes/")
+                                    .unwrap_or(&upstream.tracking_ref),
+                                summary
+                                    .files
+                                    .as_ref()
+                                    .and_then(|f| f.ahead)
+                                    .map_or("?".into(), |n| n.to_string()),
+                                summary
+                                    .files
+                                    .as_ref()
+                                    .and_then(|f| f.behind)
+                                    .map_or("?".into(), |n| n.to_string())
+                            )
+                        },
+                    );
+                    format!(
+                        "LOCAL WORK TO REVIEW\n{files}Commits absent from fetched refs: {} (all branches + HEAD)\nBranches without remote upstream: {} · Stashes: {}\nUpstream: {upstream}\n{}\n",
+                        summary.commits_not_on_remote,
+                        summary.branches_without_upstream,
+                        summary.stashes,
+                        if summary.has_remote_refs {
+                            "Comparison: last-fetched refs; F refreshes the remote view."
+                        } else {
+                            "Comparison: UNVERIFIED — no fetched remote refs."
+                        }
+                    )
+                }
+                Err(error) => format!(
+                    "LOCAL WORK TO REVIEW\nSummary: UNKNOWN — {}\n",
+                    crate::git_actions::visible(error.as_bytes())
+                ),
             };
+            let actions = if repo.bare {
+                "RECLAIM SPACE\nw Worktree manager — inspect / remove linked checkouts\nBare repository: select a checkout for Clean or Reset.\n\n"
+            } else {
+                "RECLAIM SPACE\nc Clean checkout · r Reset to remote\n"
+            };
+            let effects = if repo.bare {
+                String::new()
+            } else if repo.head.is_none() {
+                "No commits yet; Clean and Reset require an existing HEAD.\n\n".into()
+            } else {
+                format!(
+                    "Clean: discards file changes and eligible untracked/ignored items.\n{}\n{}\nOther branches and stashes are kept unless opted into deletion.\n\n",
+                    if panel.options.discard_commits {
+                        "Clean option ON: DELETE current-branch commits beyond upstream."
+                    } else {
+                        "Clean keeps local commits, branches and stashes."
+                    },
+                    if repo.upstream.is_none() {
+                        "Reset: unavailable until a remote upstream is configured."
+                    } else {
+                        "Reset: also discards current-branch commits beyond the upstream."
+                    }
+                )
+            };
+            let enabled = |value| if value { "x" } else { " " };
             let options = if repo.bare {
                 String::new()
             } else {
                 format!(
-                    "OPTIONS (off by default)\nf [{}] Force Push with lease\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\n\n",
-                    enabled(panel.options.force),
+                    "OPTIONS (off by default)\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\nf [{}] Force Push with lease\n\n",
                     enabled(panel.options.discard_commits),
                     enabled(panel.options.delete_branches),
                     enabled(panel.options.clear_stashes),
+                    enabled(panel.options.force)
                 )
             };
             (
                 " GIT OPERATIONS ",
                 format!(
-                    "{commands}\n{worktree_action}\n{kind}: {}\nBranch: {}\nUpstream: {}\n\n{options}{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nt Open shell here (exit returns to this panel).\n↑/↓ or PgUp/PgDn scroll · Esc closes",
-                    display_name(repo.root.as_os_str()),
-                    repo.branch.as_deref().unwrap_or("detached"),
-                    repo.upstream.as_ref().map_or_else(
-                        || "not configured (Pull/Push/Reset disabled)".into(),
-                        |u| format!("{} / {}", u.remote, u.remote_ref)
-                    ),
+                    "{kind}: {}\n{summary}\n{actions}{worktree_action}{effects}DETAILS / PRESERVE FIRST\ni Status · v Branches · u Local commits · z Stashes\nP Push · p Pull · F Fetch · w Worktrees · t Shell\nR Refresh local summary (no network)\n\n{options}{}\nPath: {}\nEvery cleanup opens a fresh preview before confirmation.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                    repo.branch.as_deref().unwrap_or("detached HEAD"),
                     panel
                         .error
                         .as_ref()
                         .map(|error| format!("Error: {error}"))
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    display_name(repo.root.as_os_str())
                 ),
                 false,
             )

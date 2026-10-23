@@ -165,8 +165,28 @@ Press `h` on a hidden item to show it again, or `H` to restore everything. Showi
 
 Press `Ctrl+g` on a repository or an item inside it to open the floating action
 panel. This also works when scanning a directory inside a larger repository.
-The **GIT OPERATIONS** panel identifies primary repositories, bare hubs and linked
-worktrees, and shows the current branch and configured upstream. A linked worktree
+The **GIT OPERATIONS** panel starts with the local work to review before reclaiming
+space: uncommitted changes, untracked and ignored items, commits absent from
+fetched remote refs, branches without a verified remote upstream, and stashes.
+The commit count covers all local branches plus detached HEAD and counts shared
+commits once. A branch without an upstream can still have all its commits on a
+remote; the two counts are separate. No fetched remote refs means **UNVERIFIED**.
+Ignored items can be whole directories, such as `target/`, rather than individual
+files; review the cleanup preview for the exact paths affected.
+
+Clean and Reset appear before the supporting inspection and sync actions, with
+an explanation of what each discards or preserves. This helps distinguish local
+work worth keeping from disposable dependencies and build output. Optional
+commit, branch and stash deletion stays off by default.
+
+The summary loads only when Git Operations opens, uses local Git data, and does
+not run a second disk-usage scan. Press `R` to refresh the home summary locally,
+or `F` to fetch updated remote refs. Comparisons always describe cached refs,
+rather than a guarantee about the current remote. Cleanup previews recheck the
+repository before making changes.
+
+The panel identifies primary repositories, bare hubs and linked worktrees, and
+shows the current branch and configured upstream. A linked worktree
 also offers `D` to delete that checkout directly, without opening the worktree list.
 This uses the same options, preview and `y` confirmation as worktree management;
 its parent repository's branch and shared history are retained.
@@ -179,6 +199,7 @@ its parent repository's branch and shared history are retained.
 | z | Select and delete individual repository-wide stashes |
 | t | Open a shell here; exit returns to this Git panel |
 | F | Fetch configured remotes and refresh Git indicators |
+| R | Refresh the local work summary without network access |
 | w | Open the repository’s worktree manager |
 | D | Preview deletion of this linked worktree (shown only for linked worktrees) |
 | p / P | Preview Pull / Push |

@@ -160,7 +160,7 @@ pub enum GitJob {
 }
 pub enum GitEvent {
     Progress(String),
-    Inspected(Result<Repository, String>),
+    Inspected(Result<crate::git_manage::Operations, String>),
     Reported {
         command: GitCommand,
         result: Result<crate::git_manage::Report, String>,
@@ -187,13 +187,13 @@ impl GitActionTask {
                 read_only: false,
             };
             let event = match job {
-                GitJob::Inspect(path) => GitEvent::Inspected(inspect_with(&path, &runner)),
-                GitJob::InspectRoot(path) => GitEvent::Inspected(inspect_root(&path, &runner)),
+                GitJob::Inspect(path) => GitEvent::Inspected(inspect_with(&path, &runner).map(|repo| crate::git_manage::operations(repo, &runner))),
+                GitJob::InspectRoot(path) => GitEvent::Inspected(inspect_root(&path, &runner).map(|repo| crate::git_manage::operations(repo, &runner))),
                 GitJob::Report { path, command } => GitEvent::Reported {
                     command,
                     result: crate::git_manage::load(&path, command, &runner),
                 },
-                GitJob::InspectCheckout(path) => GitEvent::Inspected(inspect_checkout(&path, &runner)),
+                GitJob::InspectCheckout(path) => GitEvent::Inspected(inspect_checkout(&path, &runner).map(|repo| crate::git_manage::operations(repo, &runner))),
                 GitJob::Preview { path, action, options } => GitEvent::Previewed(inspect_checkout(&path, &runner).and_then(|_| prepare_with(&path, action, options, &runner)).map(Box::new)),
                 GitJob::Execute(preview) => GitEvent::Finished(execute_with(&preview, &runner).map_err(|e| format!("{e}\n\nSome steps may have completed. Refresh and review before retrying."))),
                 GitJob::ManagePreview { path, action } => GitEvent::ManagePreviewed(crate::git_manage::prepare_with(&path, action, &runner).map(Box::new)),
@@ -649,6 +649,18 @@ pub fn report(path: &Path, command: GitCommand, cancel: &AtomicBool) -> Result<S
     )
 }
 
+pub(crate) fn status_text(repo: &Repository, state: &crate::worktrees::LocalState) -> String {
+    format!(
+        "Repository: {}\nBranch: {}\n\nWorktree: {}\nUpstream: {}\nAhead: {}\nBehind: {}\n\nComparisons use last-fetched refs. F Fetch refreshes them.\n",
+        display_name(repo.root.as_os_str()),
+        repo.branch.as_deref().unwrap_or("detached HEAD"),
+        if state.dirty() { "DIRTY" } else { "CLEAN" },
+        state.upstream.as_deref().unwrap_or("not configured"),
+        state.ahead.map_or("unknown".into(), |n| n.to_string()),
+        state.behind.map_or("unknown".into(), |n| n.to_string())
+    )
+}
+
 pub(crate) fn report_with(
     path: &Path,
     command: GitCommand,
@@ -670,12 +682,7 @@ pub(crate) fn report_with(
     match command {
         GitCommand::Status => {
             let state = crate::worktrees::local_state(root, runner)?;
-            text.push_str(&format!("Worktree: {}\nUpstream: {}\nAhead: {}\nBehind: {}\n\nComparisons use last-fetched refs. F Fetch refreshes them.\n",
-                if state.dirty() { "DIRTY" } else { "CLEAN" },
-                state.upstream.as_deref().unwrap_or("not configured"),
-                state.ahead.map_or("unknown".into(), |n| n.to_string()),
-                state.behind.map_or("unknown".into(), |n| n.to_string()),
-            ));
+            return Ok(status_text(&repo, &state));
         }
         GitCommand::Branches | GitCommand::LocalCommits | GitCommand::Stashes => {
             return Ok(crate::git_manage::list(repo, command, runner)?.text);

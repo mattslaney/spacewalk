@@ -60,6 +60,7 @@ pub enum Modal {
 #[derive(Clone)]
 pub struct GitPanel {
     pub repository: Repository,
+    pub summary: Result<Box<git_manage::ReclaimSummary>, String>,
     pub options: GitOptions,
     pub error: Option<String>,
     pub report: Option<(GitCommand, String)>,
@@ -420,10 +421,12 @@ impl App {
                     self.operation = None;
                     self.modal_scroll = 0;
                     match event {
-                        GitEvent::Inspected(Ok(repository)) => {
+                        GitEvent::Inspected(Ok(operations)) => {
+                            let repository = operations.repository;
                             let mut panel =
                                 self.git_panel_return.take().unwrap_or_else(|| GitPanel {
                                     repository: repository.clone(),
+                                    summary: operations.summary.clone().map(Box::new),
                                     options: GitOptions::default(),
                                     error: None,
                                     report: None,
@@ -431,6 +434,8 @@ impl App {
                                     selected: 0,
                                 });
                             panel.repository = repository;
+                            panel.summary = operations.summary.map(Box::new);
+                            panel.error = None;
                             self.modal = Some(Modal::GitPanel(panel));
                         }
                         GitEvent::Reported { command, result } => {
@@ -443,6 +448,9 @@ impl App {
                                             .get(panel.selected)
                                             .map(GitEntry::identity);
                                         panel.repository = report.repository;
+                                        if let Some(summary) = report.summary {
+                                            panel.summary = summary.map(Box::new);
+                                        }
                                         panel.entries = report.entries;
                                         panel.selected = selected
                                             .and_then(|id| {
@@ -501,6 +509,11 @@ impl App {
                             self.modal = Some(Modal::WorktreePreview(preview))
                         }
                         GitEvent::Finished(result) => {
+                            if let Some(panel) = self.worktree_panel_return.as_mut() {
+                                panel.summary =
+                                    Err("Git state changed. Press R to refresh the local summary."
+                                        .into());
+                            }
                             self.modal = Some(Modal::Result {
                                 title: " GIT RESULT ".into(),
                                 text: result.unwrap_or_else(|error| error),
@@ -1263,6 +1276,14 @@ impl App {
             } else if let Some(Modal::GitPanel(panel)) = &self.modal {
                 let path = panel.repository.root.clone();
                 self.open_worktrees(path);
+            }
+            return;
+        }
+        if key.code == KeyCode::Char('R') {
+            if let Some(Modal::GitPanel(panel)) = self.modal.take() {
+                let path = panel.repository.root.clone();
+                self.git_panel_return = Some(panel);
+                self.start_git_job(GitJob::InspectRoot(path));
             }
             return;
         }

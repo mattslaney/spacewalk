@@ -132,6 +132,118 @@ pub struct Report {
     pub repository: Repository,
     pub text: String,
     pub entries: Vec<Entry>,
+    pub summary: Option<Result<ReclaimSummary, String>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReclaimSummary {
+    pub files: Option<worktrees::LocalState>,
+    pub ignored_items: usize,
+    pub commits_not_on_remote: u64,
+    pub branches_without_upstream: usize,
+    pub stashes: usize,
+    pub has_remote_refs: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Operations {
+    pub repository: Repository,
+    pub summary: Result<ReclaimSummary, String>,
+}
+
+/// Read only Git metadata/path classifications. Never scan checkout sizes or fetch.
+pub(crate) fn reclaim_summary(
+    repo: &Repository,
+    runner: &Runner<'_>,
+) -> Result<ReclaimSummary, String> {
+    let local = runner.local();
+    let runner = &local;
+    let root = &repo.root;
+    let files = if repo.bare {
+        None
+    } else {
+        Some(worktrees::local_state(root, runner)?)
+    };
+    let ignored_items = if repo.bare {
+        0
+    } else {
+        runner
+            .run(
+                root,
+                &[
+                    "ls-files",
+                    "--others",
+                    "--ignored",
+                    "--exclude-standard",
+                    "--directory",
+                    "-z",
+                ],
+            )?
+            .split(|&byte| byte == 0)
+            .filter(|path| !path.is_empty())
+            .count()
+    };
+    let refs = runner.text(root, &["for-each-ref", "--format=%(refname)"])?;
+    let refs: HashSet<_> = refs.lines().collect();
+    let has_remote_refs = refs.iter().any(|name| name.starts_with("refs/remotes/"));
+    let branches = runner.text(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(upstream)%00%(upstream:remotename)",
+            "refs/heads/",
+        ],
+    )?;
+    let mut branches_without_upstream = 0;
+    for branch in branches.lines() {
+        let (upstream, remote) = branch
+            .split_once('\0')
+            .ok_or("Cannot inspect branch upstreams")?;
+        if remote.is_empty()
+            || remote == "."
+            || !upstream.starts_with("refs/remotes/")
+            || !refs.contains(upstream)
+        {
+            branches_without_upstream += 1;
+        }
+    }
+    let mut args = vec!["rev-list", "--count", "--branches"];
+    if repo.head.is_some() {
+        args.push("HEAD");
+    }
+    args.extend(["--not", "--remotes", "--"]);
+    let commits_not_on_remote = runner
+        .text(root, &args)?
+        .parse()
+        .map_err(|_| "Cannot count local commits")?;
+    let stashes = if repo.bare {
+        if refs.contains("refs/stash") {
+            runner
+                .text(root, &["reflog", "show", "--format=%H", "refs/stash"])?
+                .lines()
+                .count()
+        } else {
+            0
+        }
+    } else {
+        stashes(root, runner)?.len()
+    };
+    Ok(ReclaimSummary {
+        files,
+        ignored_items,
+        commits_not_on_remote,
+        branches_without_upstream,
+        stashes,
+        has_remote_refs,
+    })
+}
+
+pub(crate) fn operations(repository: Repository, runner: &Runner<'_>) -> Operations {
+    let summary = reclaim_summary(&repository, runner);
+    Operations {
+        repository,
+        summary,
+    }
 }
 
 fn counts(root: &Path, left: &str, right: &str, runner: &Runner<'_>) -> Result<(u64, u64), String> {
@@ -321,6 +433,7 @@ pub(crate) fn list(
         repository: repo,
         text,
         entries,
+        summary: None,
     })
 }
 pub(crate) fn load(
@@ -331,14 +444,37 @@ pub(crate) fn load(
     let local = runner.local();
     let runner = &local;
     let repository = git_actions::inspect_root(path, runner)?;
+    if command == GitCommand::Status && !repository.bare {
+        let summary = reclaim_summary(&repository, runner);
+        let text = if let Ok(summary) = &summary {
+            git_actions::status_text(
+                &repository,
+                summary
+                    .files
+                    .as_ref()
+                    .ok_or("Checkout status is unavailable")?,
+            )
+        } else {
+            git_actions::report_with(path, command, runner)?
+        };
+        return Ok(Report {
+            repository,
+            text,
+            entries: Vec::new(),
+            summary: Some(summary),
+        });
+    }
     if matches!(
         command,
         GitCommand::Branches | GitCommand::Stashes | GitCommand::LocalCommits
     ) {
-        return list(repository, command, runner);
+        let mut report = list(repository, command, runner)?;
+        report.summary = Some(reclaim_summary(&report.repository, runner));
+        return Ok(report);
     }
     let text = git_actions::report_with(path, command, runner)?;
     Ok(Report {
+        summary: Some(reclaim_summary(&repository, runner)),
         repository,
         text,
         entries: Vec::new(),

@@ -514,3 +514,70 @@ fn branches_under_bisection_are_kept_even_with_a_detached_head() {
     );
     assert!(git(&f.root, &["branch", "--list", "main"]).contains("main"));
 }
+
+#[test]
+fn reclaim_summary_counts_unique_local_work_across_branches_and_includes_ignored_items() {
+    let f = Fixture::new();
+    commit(&f.root, "local-only");
+    git(&f.root, &["branch", "alias-one"]);
+    git(&f.root, &["branch", "alias-two"]);
+    fs::write(f.root.join("tracked"), "stash data").unwrap();
+    git(&f.root, &["stash", "push", "-m", "saved"]);
+    fs::write(f.root.join("tracked"), "staged").unwrap();
+    git(&f.root, &["add", "tracked"]);
+    fs::write(f.root.join("tracked"), "modified").unwrap();
+    fs::write(f.root.join("scratch"), "local file").unwrap();
+    fs::write(f.root.join(".git/info/exclude"), "cache/\nlocal.env\n").unwrap();
+    fs::create_dir(f.root.join("cache")).unwrap();
+    fs::write(f.root.join("cache/output"), "build output").unwrap();
+    fs::write(f.root.join("local.env"), "private local settings").unwrap();
+    let refs = git(&f.root, &["show-ref"]);
+    let index = fs::read(f.root.join(".git/index")).unwrap();
+    git(
+        &f.root,
+        &["remote", "set-url", "origin", "/missing/no-network.git"],
+    );
+    let summary = f.read(GitCommand::Branches).summary.unwrap().unwrap();
+    assert_eq!(
+        summary.commits_not_on_remote, 1,
+        "Shared commits must not be counted once per branch"
+    );
+    assert_eq!(summary.branches_without_upstream, 2);
+    assert_eq!(summary.stashes, 1);
+    assert!(summary.has_remote_refs);
+    let files = summary.files.unwrap();
+    assert_eq!((files.staged, files.modified, files.untracked), (1, 1, 1));
+    assert_eq!(summary.ignored_items, 2);
+    assert_eq!(git(&f.root, &["show-ref"]), refs);
+    assert_eq!(fs::read(f.root.join(".git/index")).unwrap(), index);
+    git(&f.root, &["reset", "--hard", "origin/main"]);
+    let summary = f.read(GitCommand::Branches).summary.unwrap().unwrap();
+    assert_eq!(
+        summary.commits_not_on_remote, 1,
+        "Local work on other branches must remain visible"
+    );
+    assert_eq!(summary.files.unwrap().ahead, Some(0));
+}
+
+#[test]
+fn reclaim_summary_accounts_for_detached_heads_and_missing_remote_refs() {
+    let f = Fixture::new();
+    commit(&f.root, "detached-only");
+    git(&f.root, &["switch", "--detach"]);
+    git(&f.root, &["branch", "-f", "main", "origin/main"]);
+    let summary = f.read(GitCommand::LocalCommits).summary.unwrap().unwrap();
+    assert_eq!(summary.commits_not_on_remote, 1);
+    assert!(summary.has_remote_refs);
+    git(&f.root, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    let summary = f.read(GitCommand::LocalCommits).summary.unwrap().unwrap();
+    assert!(!summary.has_remote_refs);
+    assert_eq!(summary.branches_without_upstream, 1);
+    let bare = git_manage::read(&f.remote, GitCommand::Branches, &AtomicBool::new(false))
+        .unwrap()
+        .summary
+        .unwrap()
+        .unwrap();
+    assert!(bare.files.is_none());
+    assert_eq!(bare.ignored_items, 0);
+    assert!(!bare.has_remote_refs);
+}
