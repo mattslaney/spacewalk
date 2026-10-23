@@ -165,7 +165,11 @@ Press `h` on a hidden item to show it again, or `H` to restore everything. Showi
 
 Press `Ctrl+g` on a repository or an item inside it to open the floating action
 panel. This also works when scanning a directory inside a larger repository.
-The panel shows the repository, current branch, and configured upstream.
+The **GIT OPERATIONS** panel identifies primary repositories, bare hubs and linked
+worktrees, and shows the current branch and configured upstream. A linked worktree
+also offers `D` to delete that checkout directly, without opening the worktree list.
+This uses the same options, preview and `y` confirmation as worktree management;
+its parent repository's branch and shared history are retained.
 
 | Panel key | Action |
 | --- | --- |
@@ -176,6 +180,7 @@ The panel shows the repository, current branch, and configured upstream.
 | z | List repository-wide Stashes |
 | F | Fetch configured remotes and refresh Git indicators |
 | w | Open the repository’s worktree manager |
+| D | Preview deletion of this linked worktree (shown only for linked worktrees) |
 | p / P | Preview Pull / Push |
 | c | Preview Clean checkout |
 | r | Preview Reset to remote |
@@ -274,14 +279,22 @@ Press `d` to remove the selected or marked checkouts. Force starts off; use `f` 
 the removal options to enable it explicitly, then Enter to prepare a preview.
 The preview lists local changes, untracked and ignored content, detached-only
 commits, and reported checkout usage. Only `y` executes; Enter or Esc cancels.
+A separate `v` option, **Remove nested repositories/submodules**, starts off and
+requires Force as well. With both enabled, the preview lists each nested path,
+HEAD, refs and local changes, including ignored files. Removing those nested
+repositories can permanently discard their own branches, stashes and unpushed
+history along with their Git metadata. File contents are never shown in previews.
 Associated local branches are kept, including unpushed branches. Force is required
 for local changes and detached commits not retained by branches, tags, or
 remote-tracking references.
 
 Main worktrees, bare hubs, locked worktrees, and checkouts containing Spacewalk's
 scan root or process working directory cannot be removed. Nested repositories and
-submodules are protected even with Force. Registrations and checkout state are
-checked again before removal; partial batches retain unsuccessful selections.
+submodules are protected unless the separate nested-removal option is enabled.
+Nested linked/locked worktrees and repositories supporting checkouts outside the
+selected tree remain protected even with both options enabled. Registrations,
+nested refs and checkout contents are checked again before removal; partial
+batches retain unsuccessful selections.
 If Git unregisters a checkout but leaves files behind after an I/O error, its
 leftover path remains marked in the open manager for inspection in the shell.
 Progress and results use the usual floating panels, and the list refreshes when

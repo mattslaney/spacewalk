@@ -38,12 +38,20 @@ pub enum Modal {
     Delete(DeleteBatch),
     Errors,
     FileInput(FileInput),
-    Result { title: String, text: String },
+    Result {
+        title: String,
+        text: String,
+    },
     GitPanel(GitPanel),
     GitPreview(Box<GitPreview>),
     Progress,
     Worktrees,
-    WorktreeRemove { paths: Vec<PathBuf>, force: bool },
+    WorktreeRemove {
+        paths: Vec<PathBuf>,
+        common_dir: PathBuf,
+        force: bool,
+        remove_nested: bool,
+    },
     WorktreePreview(Box<WorktreePreview>),
 }
 
@@ -1003,7 +1011,7 @@ impl App {
     fn start_git_job(&mut self, job: GitJob) {
         self.pause_worktree_scan();
         let (title, context) = match &job {
-            GitJob::Inspect(path) | GitJob::InspectCheckout(path) => {
+            GitJob::Inspect(path) | GitJob::InspectRoot(path) | GitJob::InspectCheckout(path) => {
                 ("Inspect repository".into(), display_name(path.as_os_str()))
             }
             GitJob::Report { path, command } => {
@@ -1078,11 +1086,29 @@ impl App {
             return;
         }
         let path = b.data.path(b.selected);
-        let directory = if b.data.nodes[b.selected].kind == Kind::Directory {
+        let selected_kind = b.data.nodes[b.selected].kind;
+        let directory = if selected_kind == Kind::Directory
+            || (selected_kind == Kind::Symlink && path.is_dir())
+        {
             path
         } else {
             path.parent().unwrap_or(&b.data.root).to_path_buf()
         };
+        if selected_kind == Kind::Symlink && directory.is_dir() {
+            self.start_git_job(GitJob::Inspect(directory));
+            return;
+        }
+        // Use roots discovered in the snapshot, including linked-worktree .git
+        // files. This also handles selecting a repository's metadata directory.
+        let repositories: Vec<_> = b.repositories.keys().map(|&id| b.data.path(id)).collect();
+        if let Some(root) = repositories
+            .iter()
+            .filter(|root| directory.starts_with(root))
+            .max_by_key(|root| root.components().count())
+        {
+            self.start_git_job(GitJob::InspectRoot(root.clone()));
+            return;
+        }
         self.start_git_job(GitJob::Inspect(directory));
     }
 
@@ -1162,6 +1188,32 @@ impl App {
             return;
         }
         if panel.report.is_some() {
+            return;
+        }
+        if key.code == KeyCode::Char('D') && panel.repository.linked_worktree {
+            if self.scanning.is_some()
+                || self.deleting.is_some()
+                || self.file_task.is_some()
+                || self.git_action.is_some()
+            {
+                panel.error =
+                    Some("Wait for the current operation before removing a worktree.".into());
+                return;
+            }
+            let paths = vec![panel.repository.root.clone()];
+            let common_dir = panel.repository.common_dir.clone();
+            if self.worktrees.is_none()
+                && let Some(Modal::GitPanel(panel)) = self.modal.take()
+            {
+                self.worktree_panel_return = Some(panel);
+            }
+            self.modal = Some(Modal::WorktreeRemove {
+                paths,
+                common_dir,
+                force: false,
+                remove_nested: false,
+            });
+            self.modal_scroll = 0;
             return;
         }
         let action = match key.code {
@@ -1247,7 +1299,14 @@ impl App {
     }
 
     fn return_to_worktrees(&mut self) {
-        self.modal = self.worktree_home();
+        self.modal = if self.worktrees.is_some() {
+            self.worktree_home()
+        } else {
+            self.worktree_panel_return
+                .take()
+                .filter(|panel| panel.repository.root.is_dir())
+                .map(Modal::GitPanel)
+        };
         self.modal_scroll = 0;
         self.refresh_worktrees();
     }
@@ -1279,16 +1338,28 @@ impl App {
             self.return_to_worktrees();
             return;
         }
-        if let Some(Modal::WorktreeRemove { force, .. }) = self.modal.as_mut() {
+        if let Some(Modal::WorktreeRemove {
+            force,
+            remove_nested,
+            ..
+        }) = self.modal.as_mut()
+        {
             if key.code == KeyCode::Char('f') {
                 *force = !*force;
                 return;
             }
+            if key.code == KeyCode::Char('v') {
+                *remove_nested = !*remove_nested;
+                return;
+            }
             if key.code == KeyCode::Enter {
-                let Some(Modal::WorktreeRemove { paths, force }) = self.modal.take() else {
-                    return;
-                };
-                let Some(manager) = &self.worktrees else {
+                let Some(Modal::WorktreeRemove {
+                    paths,
+                    common_dir,
+                    force,
+                    remove_nested,
+                }) = self.modal.take()
+                else {
                     return;
                 };
                 let cwd = match std::env::current_dir() {
@@ -1302,9 +1373,10 @@ impl App {
                     }
                 };
                 let request = WorktreeRequest::Remove {
-                    common_dir: manager.common_dir.clone(),
+                    common_dir,
                     paths,
                     force,
+                    remove_nested,
                     protected: vec![self.root.clone(), cwd],
                     options: self.options,
                 };
@@ -1345,7 +1417,11 @@ impl App {
         if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
             self.worktree_scan = None;
             self.worktrees = None;
-            self.modal = self.worktree_panel_return.take().map(Modal::GitPanel);
+            self.modal = self
+                .worktree_panel_return
+                .take()
+                .filter(|panel| panel.repository.root.is_dir())
+                .map(Modal::GitPanel);
             self.modal_scroll = 0;
             return;
         }
@@ -1386,7 +1462,9 @@ impl App {
                 };
                 self.modal = Some(Modal::WorktreeRemove {
                     paths,
+                    common_dir: manager.common_dir.clone(),
                     force: false,
+                    remove_nested: false,
                 });
                 self.modal_scroll = 0;
             }

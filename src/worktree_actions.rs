@@ -2,7 +2,9 @@
 use crate::{
     display_name,
     files::Directory,
-    git_actions::{Fingerprint, Runner, fingerprint, inspect_checkout, visible},
+    git_actions::{
+        Fingerprint, Runner, fingerprint, fingerprint_removal, inspect_checkout, visible,
+    },
     scan::{self, Options},
     worktrees::{self, Registry, WorktreeRecord},
 };
@@ -20,6 +22,7 @@ pub enum WorktreeRequest {
         common_dir: PathBuf,
         paths: Vec<PathBuf>,
         force: bool,
+        remove_nested: bool,
         protected: Vec<PathBuf>,
         options: Options,
     },
@@ -46,6 +49,102 @@ struct RemovalTarget {
     record: WorktreeRecord,
     anchor: Directory,
     state: Fingerprint,
+    nested: Option<Vec<NestedRepository>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NestedRepository {
+    path: PathBuf,
+    common_dir: PathBuf,
+    registrations: Vec<WorktreeRecord>,
+    refs: Vec<u8>,
+    head: Vec<u8>,
+    config: Vec<u8>,
+    status: Vec<u8>,
+}
+
+fn nested_repositories(
+    root: &Path,
+    state: &Fingerprint,
+    runner: &Runner<'_>,
+) -> Result<Vec<NestedRepository>, String> {
+    let mut result = Vec::new();
+    for path in state.nested_repositories() {
+        runner.check()?;
+        let registry = worktrees::discover(&path, runner.cancel_flag())?;
+        let current = registry.records.iter().find(|record| record.path == path);
+        let current = if let Some(current) = current {
+            current
+        } else {
+            // For an absorbed submodule, Git may list the administrative Git
+            // directory as its primary worktree. Verify the actual checkout and
+            // enclosing superproject before accepting that special layout.
+            inspect_checkout(&path, runner)?;
+            let mut superproject =
+                runner.run(&path, &["rev-parse", "--show-superproject-working-tree"])?;
+            if superproject.last() == Some(&b'\n') {
+                superproject.pop();
+            }
+            let superproject = worktrees::os_path(&superproject);
+            if !superproject.is_absolute()
+                || !superproject.starts_with(root)
+                || superproject == path
+            {
+                return Err(
+                    "Nested repository root could not be verified; repair it in the shell".into(),
+                );
+            }
+            registry
+                .records
+                .first()
+                .filter(|record| record.main && !record.bare && record.path == registry.common_dir)
+                .ok_or("Submodule registration could not be verified; repair it in the shell")?
+        };
+        if !current.main || current.locked.is_some() {
+            return Err(format!(
+                "{} is a nested linked or locked worktree. Remove it separately in its own worktree manager first.",
+                display_name(path.as_os_str())
+            ));
+        }
+        if registry
+            .records
+            .iter()
+            .any(|record| record != current && !record.path.starts_with(root))
+        {
+            return Err(format!(
+                "{} has registered worktrees outside the selected checkout. Remove those separately before deleting this nested repository.",
+                display_name(path.as_os_str())
+            ));
+        }
+        let status = if current.bare {
+            Vec::new()
+        } else {
+            runner.run(
+                &path,
+                &[
+                    "status",
+                    "--short",
+                    "--untracked-files=all",
+                    "--ignored=matching",
+                ],
+            )?
+        };
+        result.push(NestedRepository {
+            refs: runner.run(
+                &path,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            )?,
+            head: runner
+                .run(&path, &["rev-parse", "--verify", "--quiet", "HEAD"])
+                .unwrap_or_default(),
+            config: runner.run(&path, &["config", "--local", "--null", "--list"])?,
+            path,
+            common_dir: registry.common_dir,
+            registrations: registry.records,
+            status,
+        });
+    }
+    Ok(result)
 }
 
 #[derive(Clone, Debug)]
@@ -196,6 +295,7 @@ pub(crate) fn prepare_with(
         WorktreeRequest::Remove {
             paths,
             force,
+            remove_nested,
             protected,
             options,
             ..
@@ -203,17 +303,21 @@ pub(crate) fn prepare_with(
             if paths.is_empty() {
                 return Err("No worktrees selected".into());
             }
+            if remove_nested && !force {
+                return Err("Removing nested repositories/submodules requires both Force and Remove nested repositories. Both options start off.".into());
+            }
             let mut unique = HashSet::new();
             let mut targets = Vec::new();
             let mut reported_total = 0_u64;
             let mut text = format!(
-                "Remove {} selected worktrees?\nForce: {}\n\nAll checkout files, including ignored dependencies and configuration, will be permanently removed. Local branches and shared repository history are kept.\n",
+                "Remove {} selected worktrees?\nForce: {}\nRemove nested repositories/submodules: {}\n\nAll checkout files, including ignored dependencies and configuration, will be permanently removed. Parent repository branches and shared history are kept.\n",
                 paths.len(),
                 if force {
                     "ON: local changes and detached-only commits may be discarded"
                 } else {
                     "off"
-                }
+                },
+                if remove_nested { "ON" } else { "off" }
             );
             for path in paths {
                 runner.check()?;
@@ -231,14 +335,26 @@ pub(crate) fn prepare_with(
                 if worktrees::discover(&record.path, runner.cancel_flag())?.common_dir != common {
                     return Err("Checkout now belongs to a different repository".into());
                 }
-                let state = fingerprint(&record.path, &runner)?;
+                let state = if remove_nested {
+                    fingerprint_removal(&record.path, &runner)?
+                } else {
+                    fingerprint(&record.path, &runner)?
+                };
                 let nested = state.nested_repositories();
-                if !nested.is_empty() {
+                if !nested.is_empty() && !remove_nested {
                     return Err(format!(
-                        "{} contains a nested repository or submodule. Resolve this in the shell; forced recursive removal is not offered.",
-                        display_name(record.path.as_os_str())
+                        "{} contains a nested repository or submodule:\n{}\nEnable Force AND Remove nested repositories explicitly to preview their deletion. Nested linked/locked worktrees and repositories supporting external worktrees remain protected.",
+                        display_name(record.path.as_os_str()),
+                        nested
+                            .iter()
+                            .map(|path| display_name(path.as_os_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     ));
                 }
+                let nested = remove_nested
+                    .then(|| nested_repositories(&record.path, &state, &runner))
+                    .transpose()?;
                 let local = worktrees::local_state(&record.path, &runner)?;
                 if local.dirty() && !force {
                     return Err(format!(
@@ -273,6 +389,18 @@ pub(crate) fn prepare_with(
                     record.head.as_deref().unwrap_or("unknown"),
                     crate::human_size(snapshot.nodes[0].size)
                 ));
+                if let Some(nested) = &nested {
+                    for repository in nested {
+                        text.push_str(&format!(
+                            "\nNESTED REPOSITORY / SUBMODULE TO DELETE: {}\nCheckout files and Git metadata removed with this worktree are permanently lost, including any branches, stashes and unpushed commits stored there.\nGit store: {}\nHEAD: {}\nRefs (branches, tags, stashes and remote-tracking refs):\n{}\nLocal changes, untracked and ignored paths (also deleted):\n{}\n",
+                            display_name(repository.path.as_os_str()),
+                            display_name(repository.common_dir.as_os_str()),
+                            visible(&repository.head),
+                            visible(&repository.refs),
+                            visible(&repository.status),
+                        ));
+                    }
+                }
                 text.push_str(&format!(
                     "Local changes and untracked files:\n{}\n",
                     visible(&runner.run(
@@ -304,7 +432,17 @@ pub(crate) fn prepare_with(
                         visible(&detached)
                     ));
                 }
-                if !state.same_checkout(&fingerprint(&record.path, &runner)?) {
+                let current = if remove_nested {
+                    fingerprint_removal(&record.path, &runner)?
+                } else {
+                    fingerprint(&record.path, &runner)?
+                };
+                if !state.same_checkout(&current)
+                    || nested.as_ref().is_some_and(|expected| {
+                        nested_repositories(&record.path, &current, &runner).as_ref()
+                            != Ok(expected)
+                    })
+                {
                     return Err(
                         "Checkout changed while preparing removal; make a fresh preview".into(),
                     );
@@ -313,9 +451,10 @@ pub(crate) fn prepare_with(
                     record,
                     anchor: target_anchor,
                     state,
+                    nested,
                 });
             }
-            text.push_str(&format!("\nReported selected checkout total: {}\nReported usage is not a guarantee of bytes freed. Removal does not prune Git objects or delete branches.\n", crate::human_size(reported_total)));
+            text.push_str(&format!("\nReported selected checkout total: {}\nReported usage is not a guarantee of bytes freed. Parent repository objects and branches are retained; opted-in nested repositories may lose their own Git stores and history.\n", crate::human_size(reported_total)));
             (
                 text,
                 PreviewKind::Remove {
@@ -386,9 +525,15 @@ fn validate_target(
     {
         return Err("Checkout repository changed since preview".into());
     }
-    if !target
-        .state
-        .same_checkout(&fingerprint(&target.record.path, runner)?)
+    let current = if target.nested.is_some() {
+        fingerprint_removal(&target.record.path, runner)?
+    } else {
+        fingerprint(&target.record.path, runner)?
+    };
+    if !target.state.same_checkout(&current)
+        || target.nested.as_ref().is_some_and(|expected| {
+            nested_repositories(&target.record.path, &current, runner).as_ref() != Ok(expected)
+        })
     {
         return Err(format!(
             "{} changed since preview; nothing further will be removed",
@@ -483,7 +628,7 @@ pub(crate) fn execute_with(
                 Ok(())
             })();
             let summary = format!(
-                "Removed {} of {} worktrees. Local branches and shared Git history are kept.\n{}",
+                "Removed {} of {} worktrees. Parent repository branches and shared Git history are kept. Opted-in nested repositories and their local history may have been deleted.\n{}",
                 removed.len(),
                 targets.len(),
                 removed

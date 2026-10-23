@@ -673,11 +673,17 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         return;
     }
     let (title, text, warning) = match modal {
-        Modal::WorktreeRemove { paths, force } => (
+        Modal::WorktreeRemove {
+            paths,
+            force,
+            remove_nested,
+            ..
+        } => (
             " REMOVE WORKTREES ",
             format!(
-                "Force removal: [{}] (default off)\n\nf toggles Force · Enter prepares a preview\nEsc cancels · ↑↓ / PgUp/PgDn scroll\n\nSelected checkouts:\n{}\n\nLocal branches are kept. Main, locked, active, and nested checkouts remain protected even with Force.",
+                "f [{}] Force removal (default off)\nv [{}] Remove nested repositories/submodules (default off; requires Force)\n\nf / v toggle options · Enter prepares a preview\nEsc cancels · ↑↓ / PgUp/PgDn scroll\n\nSelected checkouts:\n{}\n\nParent repository branches are kept. Nested repositories may lose checkout files, branches, stashes and unpushed history.\nMain, locked, active, and nested linked worktrees remain protected.",
                 if *force { "x" } else { " " },
+                if *remove_nested { "x" } else { " " },
                 paths
                     .iter()
                     .map(|path| display_name(path.as_os_str()))
@@ -704,6 +710,18 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         }
         Modal::GitPanel(panel) => {
             let repo = &panel.repository;
+            let kind = if repo.bare {
+                "Bare repository"
+            } else if repo.linked_worktree {
+                "Linked worktree"
+            } else {
+                "Primary repository"
+            };
+            let worktree_action = if repo.linked_worktree {
+                "\nD Delete this worktree (preview first)\n"
+            } else {
+                ""
+            };
             let enabled = |value| if value { "x" } else { " " };
             let commands = if repo.bare {
                 "w Worktree manager\nv Branches · u Local commits · z Stashes · F Fetch\n\nBare repository: select a checkout in the worktree manager\nfor Status, Diff, Pull, Push, Clean or Reset."
@@ -722,9 +740,9 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
                 )
             };
             (
-                " GIT REPOSITORY & WORKTREES ",
+                " GIT OPERATIONS ",
                 format!(
-                    "{commands}\n\nRepository: {}\nBranch: {}\nUpstream: {}\n\n{options}{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                    "{commands}\n{worktree_action}\n{kind}: {}\nBranch: {}\nUpstream: {}\n\n{options}{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
                     display_name(repo.root.as_os_str()),
                     repo.branch.as_deref().unwrap_or("detached"),
                     repo.upstream.as_ref().map_or_else(

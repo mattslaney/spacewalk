@@ -81,6 +81,8 @@ pub struct Upstream {
 pub struct Repository {
     pub root: PathBuf,
     pub bare: bool,
+    pub linked_worktree: bool,
+    pub common_dir: PathBuf,
     pub branch: Option<String>,
     pub head: Option<String>,
     pub upstream: Option<Upstream>,
@@ -138,6 +140,7 @@ pub struct GitPreview {
 
 pub enum GitJob {
     Inspect(PathBuf),
+    InspectRoot(PathBuf),
     Report {
         path: PathBuf,
         command: GitCommand,
@@ -181,6 +184,7 @@ impl GitActionTask {
             };
             let event = match job {
                 GitJob::Inspect(path) => GitEvent::Inspected(inspect_with(&path, &runner)),
+                GitJob::InspectRoot(path) => GitEvent::Inspected(inspect_root(&path, &runner)),
                 GitJob::Report { path, command } => GitEvent::Reported {
                     command,
                     result: inspect_root(&path, &runner).and_then(|_| report_with(&path, command, &runner)),
@@ -516,7 +520,8 @@ fn path_from_output(mut bytes: Vec<u8>) -> PathBuf {
 }
 
 fn inspect_with(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> {
-    let bare = runner.text(path, &["rev-parse", "--is-bare-repository"])? == "true";
+    let bare = runner.text(path, &["rev-parse", "--is-bare-repository"])
+        .map_err(|error| format!("Cannot open Git operations for {}. Select the checkout directory containing .git, or a file inside it.\n{error}", display_name(path.as_os_str())))? == "true";
     let root = path_from_output(runner.run(
         path,
         &[
@@ -528,6 +533,15 @@ fn inspect_with(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> 
             },
         ],
     )?);
+    let git_dir = path_from_output(runner.run(path, &["rev-parse", "--absolute-git-dir"])?)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let common_dir = path_from_output(runner.run(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?)
+    .canonicalize()
+    .map_err(|error| error.to_string())?;
     let branch = runner
         .text(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .ok();
@@ -563,6 +577,8 @@ fn inspect_with(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> 
     Ok(Repository {
         root,
         bare,
+        linked_worktree: !bare && git_dir != common_dir,
+        common_dir,
         branch,
         head,
         upstream,
@@ -734,6 +750,18 @@ fn report_with(path: &Path, command: GitCommand, runner: &Runner<'_>) -> Result<
 }
 
 pub(crate) fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprint, String> {
+    fingerprint_tree(root, runner, false)
+}
+
+pub(crate) fn fingerprint_removal(root: &Path, runner: &Runner<'_>) -> Result<Fingerprint, String> {
+    fingerprint_tree(root, runner, true)
+}
+
+fn fingerprint_tree(
+    root: &Path,
+    runner: &Runner<'_>,
+    include_nested: bool,
+) -> Result<Fingerprint, String> {
     let status = runner.run(
         root,
         &[
@@ -748,9 +776,9 @@ pub(crate) fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprin
     let worktrees = runner.run(root, &["worktree", "list", "--porcelain", "-z"])?;
     let config = runner.run(root, &["config", "--local", "--null", "--list"])?;
     let head = runner.run(root, &["rev-parse", "HEAD"])?;
-    let mut pending = vec![root.to_path_buf()];
+    let mut pending = vec![(root.to_path_buf(), false)];
     let mut files = Vec::new();
-    while let Some(path) = pending.pop() {
+    while let Some((path, metadata)) = pending.pop() {
         runner.check()?;
         if files.len() % 4096 == 0 {
             runner.progress(format!(
@@ -763,6 +791,7 @@ pub(crate) fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprin
         let entry_kind = kind(&meta);
         let nested = entry_kind == Kind::Directory
             && path != root
+            && !metadata
             && (fs::symlink_metadata(path.join(".git")).is_ok()
                 || (path.join("HEAD").is_file()
                     && path.join("objects").is_dir()
@@ -775,11 +804,16 @@ pub(crate) fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprin
             modified: meta.modified().ok(),
             nested,
         });
-        if entry_kind == Kind::Directory && !nested {
+        if entry_kind == Kind::Directory && (!nested || include_nested) {
             let mut children = fs::read_dir(&path)
                 .map_err(|e| e.to_string())?
                 .filter_map(|entry| match entry {
-                    Ok(entry) if entry.file_name() != OsStr::new(".git") => Some(Ok(entry.path())),
+                    Ok(entry)
+                        if entry.file_name() != OsStr::new(".git")
+                            || (include_nested && path != root) =>
+                    {
+                        Some(Ok(entry.path()))
+                    }
                     Ok(_) => None,
                     Err(e) => Some(Err(e)),
                 })
@@ -787,7 +821,10 @@ pub(crate) fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprin
                 .map_err(|e| e.to_string())?;
             children.sort();
             children.reverse();
-            pending.extend(children);
+            pending.extend(children.into_iter().map(|child| {
+                let metadata = metadata || child.file_name() == Some(OsStr::new(".git"));
+                (child, metadata)
+            }));
         }
     }
     Ok(Fingerprint {

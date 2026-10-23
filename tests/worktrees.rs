@@ -36,6 +36,7 @@ impl Fixture {
             common_dir: self.main.clone(),
             paths,
             force,
+            remove_nested: false,
             protected: vec![self.main.clone()],
             options: Options {
                 apparent_size: true,
@@ -352,6 +353,7 @@ fn protects_main_locked_active_and_nested_checkouts_even_with_force() {
         common_dir: f.main.clone(),
         paths: vec![f.linked.clone()],
         force: true,
+        remove_nested: false,
         protected: vec![protected],
         options: Options::default(),
     };
@@ -653,6 +655,7 @@ fn bare_hub_can_remove_a_linked_checkout_and_removal_keeps_symlink_targets() {
         common_dir: hub.clone(),
         paths: vec![linked.clone()],
         force: true,
+        remove_nested: false,
         protected: vec![],
         options: Options::default(),
     };
@@ -811,4 +814,213 @@ fn sync_icons_require_a_clean_checkout_and_a_verified_remote_upstream() {
     );
     assert!(!missing.synced());
     assert_eq!(missing.icons(), "?");
+}
+
+fn allow_nested(mut request: WorktreeRequest) -> WorktreeRequest {
+    let WorktreeRequest::Remove { remove_nested, .. } = &mut request else {
+        unreachable!()
+    };
+    *remove_nested = true;
+    request
+}
+
+fn init_nested(path: &Path) {
+    fs::create_dir_all(path).unwrap();
+    git(path, &["init", "--initial-branch=main"]);
+    git(path, &["config", "user.name", "Test"]);
+    git(path, &["config", "user.email", "test@example.invalid"]);
+    fs::write(path.join("tracked"), b"initial").unwrap();
+    git(path, &["add", "."]);
+    git(path, &["commit", "-m", "initial"]);
+}
+
+#[test]
+fn nested_removal_requires_two_options_and_previews_nested_history_and_changes() {
+    let f = Fixture::new();
+    let nested = f.linked.join("nested repo");
+    init_nested(&nested);
+    let bare = nested.join("nested-bare.git");
+    git(&nested, &["init", "--bare", bare.to_str().unwrap()]);
+    fs::write(nested.join(".git/info/exclude"), ".env\n").unwrap();
+    fs::write(nested.join(".env"), "secret fixture content").unwrap();
+    fs::write(nested.join("tracked"), "local changes").unwrap();
+    fs::write(nested.join("untracked"), "keep until confirmation").unwrap();
+    assert!(
+        worktree_actions::prepare(
+            allow_nested(f.removal(vec![f.linked.clone()], false)),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("requires both Force")
+    );
+    let error = worktree_actions::prepare(
+        f.removal(vec![f.linked.clone()], true),
+        &AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert!(error.contains(nested.to_str().unwrap()));
+    let preview = worktree_actions::prepare(
+        allow_nested(f.removal(vec![f.linked.clone()], true)),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    for expected in [
+        "nested repo",
+        "nested-bare.git",
+        "refs/heads/main",
+        "tracked",
+        "untracked",
+        ".env",
+        "permanently lost",
+    ] {
+        assert!(
+            preview.text.contains(expected),
+            "{expected} absent from preview"
+        );
+    }
+    assert!(!preview.text.contains("secret fixture content"));
+    assert!(nested.exists());
+    preview.execute(&AtomicBool::new(false)).unwrap();
+    assert!(!f.linked.exists());
+    assert_eq!(git(&f.main, &["branch", "--list", "topic"]).trim(), "topic");
+    assert!(f.main.join("data").exists());
+}
+
+#[test]
+fn nested_removal_revalidates_deep_files_and_shared_refs_before_touching_a_batch() {
+    let f = Fixture::new();
+    let clean = f.temp.path().join("clean-first");
+    git(
+        &f.main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "clean-first",
+            clean.to_str().unwrap(),
+        ],
+    );
+    let nested = f.linked.join("nested");
+    init_nested(&nested);
+    fs::create_dir(nested.join("deep")).unwrap();
+    fs::write(nested.join("deep/note"), "before").unwrap();
+    let preview = worktree_actions::prepare(
+        allow_nested(f.removal(vec![clean.clone(), f.linked.clone()], true)),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    fs::write(nested.join("deep/note"), "changed after preview").unwrap();
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("changed since preview")
+    );
+    assert!(f.linked.exists());
+    assert!(clean.exists());
+    let preview = worktree_actions::prepare(
+        allow_nested(f.removal(vec![clean.clone(), f.linked.clone()], true)),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    git(&nested, &["branch", "saved-after-preview"]);
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("changed since preview")
+    );
+    assert!(nested.exists());
+    assert!(clean.exists());
+}
+
+#[test]
+fn nested_removal_keeps_other_registered_worktrees_protected() {
+    let f = Fixture::new();
+    let nested = f.linked.join("nested");
+    init_nested(&nested);
+    let other = f.temp.path().join("external nested worktree");
+    git(
+        &nested,
+        &["worktree", "add", "-b", "external", other.to_str().unwrap()],
+    );
+    let request = allow_nested(f.removal(vec![f.linked.clone()], true));
+    assert!(
+        worktree_actions::prepare(request, &AtomicBool::new(false))
+            .unwrap_err()
+            .contains("outside the selected checkout")
+    );
+    assert!(other.join("tracked").exists());
+    git(&nested, &["worktree", "remove", other.to_str().unwrap()]);
+    fs::remove_dir_all(&nested).unwrap();
+    let independent = f.temp.path().join("independent");
+    init_nested(&independent);
+    git(
+        &independent,
+        &["worktree", "add", "-b", "inner", nested.to_str().unwrap()],
+    );
+    git(
+        &independent,
+        &["worktree", "lock", nested.to_str().unwrap()],
+    );
+    let request = allow_nested(f.removal(vec![f.linked.clone()], true));
+    assert!(
+        worktree_actions::prepare(request, &AtomicBool::new(false))
+            .unwrap_err()
+            .contains("nested linked or locked")
+    );
+    assert!(nested.join("tracked").exists());
+}
+
+#[test]
+fn explicit_nested_option_removes_initialized_submodules_with_native_git() {
+    let f = Fixture::new();
+    let source = f.temp.path().join("module-source");
+    init_nested(&source);
+    git(
+        &f.linked,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            source.to_str().unwrap(),
+            "module",
+        ],
+    );
+    git(&f.linked, &["commit", "-am", "add submodule"]);
+    let module = f.linked.join("module");
+    fs::write(module.join("local-notes"), "module changes").unwrap();
+    assert!(
+        worktree_actions::prepare(
+            f.removal(vec![f.linked.clone()], true),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("nested repository or submodule")
+    );
+    let preview = worktree_actions::prepare(
+        allow_nested(f.removal(vec![f.linked.clone()], true)),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(preview.text.contains("local-notes"));
+    assert!(preview.text.contains(module.to_str().unwrap()));
+    git(&module, &["branch", "saved-after-preview"]);
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("changed since preview")
+    );
+    assert!(f.linked.exists());
+    let preview = worktree_actions::prepare(
+        allow_nested(f.removal(vec![f.linked.clone()], true)),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    preview.execute(&AtomicBool::new(false)).unwrap();
+    assert!(!f.linked.exists());
+    assert!(source.join("tracked").exists());
+    assert_eq!(git(&f.main, &["branch", "--list", "topic"]).trim(), "topic");
 }

@@ -1659,3 +1659,156 @@ fn worktree_sync_icons_are_visible_and_keep_their_color_on_selected_rows() {
         }
     }
 }
+
+#[test]
+fn git_operations_distinguishes_primary_repositories_and_linked_worktrees_and_deletes_directly() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let linked = dir.path().join("linked");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["worktree", "add", "-b", "direct-delete"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let nested = linked.join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(nested.join("nested.txt"), "nested data").unwrap();
+    init_git_fixture(&nested);
+    app.rescan();
+    wait(&mut app);
+    app.browser.as_mut().unwrap().select(0);
+    open_git(&mut app);
+    let primary = render(&mut app, 120, 42);
+    assert!(primary.contains("GIT OPERATIONS"));
+    assert!(primary.contains("Primary repository:"));
+    assert!(!primary.contains("D Delete this worktree"));
+    key(&mut app, KeyCode::Char('D'));
+    assert!(matches!(app.modal, Some(Modal::GitPanel(_))));
+    key(&mut app, KeyCode::Esc);
+    let b = app.browser.as_mut().unwrap();
+    b.select(b.data.find_path(&linked).unwrap());
+    open_git(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.repository.linked_worktree && panel.repository.root == linked)
+    );
+    assert!(app.worktrees.is_none());
+    let screen = render(&mut app, 120, 42);
+    assert!(screen.contains("Linked worktree:"));
+    assert!(screen.contains("D Delete this worktree"));
+    key(&mut app, KeyCode::Char('D'));
+    assert!(matches!(
+        app.modal,
+        Some(Modal::WorktreeRemove {
+            force: false,
+            remove_nested: false,
+            ..
+        })
+    ));
+    key(&mut app, KeyCode::Char('v'));
+    let mut repeat = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(matches!(
+        app.modal,
+        Some(Modal::WorktreeRemove {
+            force: false,
+            remove_nested: true,
+            ..
+        })
+    ));
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        render(&mut app, width, height);
+    }
+    key(&mut app, KeyCode::Esc);
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.repository.root == linked));
+    for execute in [false, true] {
+        key(&mut app, KeyCode::Char('D'));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::WorktreeRemove {
+                force: false,
+                remove_nested: false,
+                ..
+            })
+        ));
+        key(&mut app, KeyCode::Char('f'));
+        key(&mut app, KeyCode::Char('v'));
+        key(&mut app, KeyCode::Enter);
+        wait(&mut app);
+        assert!(
+            matches!(&app.modal, Some(Modal::WorktreePreview(preview)) if preview.text.contains(nested.to_str().unwrap()))
+        );
+        if !execute {
+            key(&mut app, KeyCode::Enter);
+            assert!(linked.exists());
+            assert!(
+                matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.repository.root == linked)
+            );
+        } else {
+            key(&mut app, KeyCode::Char('y'));
+            wait(&mut app);
+            assert!(matches!(app.modal, Some(Modal::Result { .. })));
+            assert!(!linked.exists());
+            key(&mut app, KeyCode::Esc);
+            assert!(app.modal.is_none());
+        }
+    }
+    assert!(dir.path().join("notes.txt").exists());
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["show-ref", "--verify", "refs/heads/direct-delete"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_g_opens_the_selected_worktree_directory_file_and_directory_symlink() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let outside = tempfile::tempdir().unwrap();
+    let linked = dir.path().join("linked");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["worktree", "add", "-b", "selected-topic"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let alias = outside.path().join("worktree-link");
+    std::os::unix::fs::symlink(&linked, &alias).unwrap();
+    app.rescan();
+    wait(&mut app);
+    for selected in [&linked, &linked.join("notes.txt"), &linked.join(".git")] {
+        let b = app.browser.as_mut().unwrap();
+        b.select(b.data.find_path(selected).unwrap());
+        open_git(&mut app);
+        assert!(
+            matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.repository.root == linked && panel.repository.linked_worktree)
+        );
+        key(&mut app, KeyCode::Esc);
+    }
+    let mut aliases = App::new(outside.path().to_owned(), Options::default());
+    wait(&mut aliases);
+    let b = aliases.browser.as_mut().unwrap();
+    b.select(b.data.find_path(&alias).unwrap());
+    open_git(&mut aliases);
+    assert!(
+        matches!(&aliases.modal, Some(Modal::GitPanel(panel)) if panel.repository.root == linked && panel.repository.linked_worktree)
+    );
+}
