@@ -134,12 +134,21 @@ pub struct LocalState {
     pub modified: usize,
     pub untracked: usize,
     pub upstream: Option<String>,
+    pub remote_upstream: bool,
     pub ahead: Option<u64>,
     pub behind: Option<u64>,
 }
 impl LocalState {
     pub fn dirty(&self) -> bool {
         self.staged + self.modified + self.untracked > 0
+    }
+
+    pub fn synced(&self) -> bool {
+        self.remote_upstream
+            && self.upstream.is_some()
+            && self.ahead == Some(0)
+            && self.behind == Some(0)
+            && !self.dirty()
     }
 }
 
@@ -195,6 +204,51 @@ pub struct WorktreeRow {
     pub registered: bool,
 }
 impl WorktreeRow {
+    /// Checkout status against its configured remote's last-fetched refs.
+    /// Other local branches and repository-wide stashes belong to the Git menu.
+    pub fn synced(&self) -> bool {
+        self.registered
+            && self.measured
+            && self.error.is_none()
+            && self.record.branch.is_some()
+            && self.record.head.is_some()
+            && self.state.as_ref().is_some_and(LocalState::synced)
+    }
+
+    pub fn icons(&self) -> String {
+        if !self.registered || self.error.is_some() {
+            return "?".into();
+        }
+        if !self.measured {
+            return "…".into();
+        }
+        if self.synced() {
+            return "✓".into();
+        }
+        let Some(state) = &self.state else {
+            return "?".into();
+        };
+        let mut icons = String::new();
+        if state.dirty() {
+            icons.push('*');
+        }
+        if let Some(ahead) = state.ahead.filter(|&count| count > 0) {
+            icons.push_str(&format!("↑{ahead}"));
+        }
+        if let Some(behind) = state.behind.filter(|&count| count > 0) {
+            icons.push_str(&format!("↓{behind}"));
+        }
+        if self.record.branch.is_none() {
+            icons.push('◇');
+        } else if !state.remote_upstream || state.ahead.is_none() || state.behind.is_none() {
+            icons.push('?');
+        }
+        if icons.is_empty() {
+            icons.push('?');
+        }
+        icons
+    }
+
     pub fn pending(record: WorktreeRecord) -> Self {
         Self {
             record,
@@ -224,9 +278,11 @@ pub fn measure(
         return row;
     }
     let runner = Runner::readonly(cancel);
-    match crate::git_actions::inspect_checkout(&record.path, &runner)
-        .and_then(|_| local_state(&record.path, &runner))
-    {
+    match crate::git_actions::inspect_checkout(&record.path, &runner).and_then(|repository| {
+        let mut state = local_state(&record.path, &runner)?;
+        state.remote_upstream = repository.upstream.is_some();
+        Ok(state)
+    }) {
         Ok(state) => row.state = Some(state),
         Err(error) => row.error = Some(error),
     }

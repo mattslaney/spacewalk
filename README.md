@@ -250,7 +250,21 @@ never during the initial directory scan. Measurements pause during rescans and
 Git jobs, then refresh when returning to the list.
 
 The view shows branch or detached HEAD, locked/prunable flags, local changes,
-and upstream state from last-fetched references. It does not fetch automatically.
+and upstream state from last-fetched references. Each checkout has a status icon:
+
+| Icon | Meaning |
+| --- | --- |
+| `✓` (green) | Clean checkout; its branch matches its configured remote upstream |
+| `*` | Staged, modified, or untracked files |
+| `↑N` / `↓N` | Commits ahead / behind the upstream; both appear for divergence |
+| `◇` | Detached HEAD |
+| `?` | No remote upstream, missing tracking ref, or unavailable status |
+| `…` | Still checking |
+
+Sync refers to this checkout's branch and **last-fetched refs**, rather than every
+branch in the repository. Ignored build output does not make a checkout dirty.
+Checks never fetch automatically; use `F` in its Git menu, then return to the list
+to update comparisons.
 Use arrows to select, `m`/`M` to mark or clear marks, `y` to copy a path, `t` to
 open a shell, and `r` to refresh. Enter opens the usual Pull, Push, Clean checkout,
 and Reset to remote actions for the selected checkout. Closing those dialogs

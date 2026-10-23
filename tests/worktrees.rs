@@ -718,3 +718,97 @@ fn inventory_worker_keeps_primary_registration_but_does_not_measure_or_list_it()
     assert_eq!(manager.rows.len(), 1);
     assert_eq!(manager.selected, f.linked);
 }
+
+#[test]
+fn sync_icons_require_a_clean_checkout_and_a_verified_remote_upstream() {
+    let f = Fixture::new();
+    let measure = || {
+        let registry = worktrees::discover(&f.main, &AtomicBool::new(false)).unwrap();
+        worktrees::measure(
+            registry
+                .records
+                .iter()
+                .find(|record| record.path == f.linked)
+                .unwrap(),
+            &registry.common_dir,
+            Options::default(),
+            &AtomicBool::new(false),
+        )
+    };
+    assert_eq!(measure().icons(), "?");
+    git(&f.linked, &["branch", "--set-upstream-to=main"]);
+    let local = measure();
+    assert_eq!(local.state.as_ref().unwrap().ahead, Some(0));
+    assert!(!local.synced(), "A local branch is not a remote upstream");
+    assert_eq!(local.icons(), "?");
+
+    let remote = f.temp.path().join("remote.git");
+    git(
+        f.temp.path(),
+        &[
+            "clone",
+            "--bare",
+            f.main.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+    git(
+        &f.main,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&f.linked, &["push", "-u", "origin", "topic"]);
+    assert!(measure().synced());
+    assert_eq!(measure().icons(), "✓");
+
+    fs::write(f.linked.join("untracked"), b"local work").unwrap();
+    assert_eq!(measure().icons(), "*");
+    fs::remove_file(f.linked.join("untracked")).unwrap();
+    fs::write(f.linked.join("data"), b"local commit").unwrap();
+    assert_eq!(measure().icons(), "*");
+    git(&f.linked, &["add", "data"]);
+    assert_eq!(measure().icons(), "*");
+    git(&f.linked, &["commit", "-m", "local"]);
+    assert_eq!(measure().icons(), "↑1");
+
+    let writer = f.temp.path().join("writer");
+    git(
+        f.temp.path(),
+        &["clone", remote.to_str().unwrap(), writer.to_str().unwrap()],
+    );
+    git(&writer, &["config", "user.name", "Test"]);
+    git(&writer, &["config", "user.email", "test@example.invalid"]);
+    git(&writer, &["switch", "topic"]);
+    fs::write(writer.join("data"), b"remote commit").unwrap();
+    git(&writer, &["add", "data"]);
+    git(&writer, &["commit", "-m", "remote"]);
+    git(&writer, &["push"]);
+    // Measurement never fetches: the remote change remains unseen until Fetch.
+    assert_eq!(measure().icons(), "↑1");
+    git(&f.main, &["fetch", "origin"]);
+    assert_eq!(measure().icons(), "↑1↓1");
+    fs::write(f.linked.join("untracked"), b"local work").unwrap();
+    assert_eq!(measure().icons(), "*↑1↓1");
+    fs::remove_file(f.linked.join("untracked")).unwrap();
+    git(&f.linked, &["reset", "--hard", "origin/topic"]);
+    assert_eq!(measure().icons(), "✓");
+    fs::write(writer.join("data"), b"another remote commit").unwrap();
+    git(&writer, &["commit", "-am", "remote again"]);
+    git(&writer, &["push"]);
+    git(&f.main, &["fetch", "origin"]);
+    assert_eq!(measure().icons(), "↓1");
+    git(&f.main, &["update-ref", "-d", "refs/remotes/origin/topic"]);
+    assert_eq!(measure().icons(), "?");
+    git(&f.linked, &["switch", "--detach"]);
+    assert_eq!(measure().icons(), "◇");
+    let record = measure().record;
+    assert_eq!(WorktreeRow::pending(record.clone()).icons(), "…");
+    fs::remove_dir_all(&f.linked).unwrap();
+    let missing = worktrees::measure(
+        &record,
+        &f.main.join(".git"),
+        Options::default(),
+        &AtomicBool::new(false),
+    );
+    assert!(!missing.synced());
+    assert_eq!(missing.icons(), "?");
+}

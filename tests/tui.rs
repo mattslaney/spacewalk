@@ -1602,3 +1602,60 @@ fn bare_repository_worktrees_are_accessible_through_ctrl_g() {
         matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.report.as_ref().unwrap().1.contains("Fetch complete"))
     );
 }
+
+#[test]
+fn worktree_sync_icons_are_visible_and_keep_their_color_on_selected_rows() {
+    use ratatui::style::Color;
+    use spacewalk::worktrees::LocalState;
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let outside = tempfile::tempdir().unwrap();
+    let linked = outside.path().join("linked");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["worktree", "add", "-b", "linked"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    app.rescan();
+    wait(&mut app);
+    app.browser.as_mut().unwrap().select(0);
+    open_worktrees(&mut app);
+    for (ahead, behind, untracked, expected, color) in [
+        (0, 0, 0, "✓", Color::Rgb(107, 226, 188)),
+        (2, 1, 1, "*↑2↓1", Color::Rgb(250, 188, 111)),
+    ] {
+        app.worktrees.as_mut().unwrap().rows[0].state = Some(LocalState {
+            upstream: Some("origin/linked".into()),
+            remote_upstream: true,
+            ahead: Some(ahead),
+            behind: Some(behind),
+            untracked,
+            ..Default::default()
+        });
+        for (width, height) in [(60, 20), (120, 42)] {
+            let screen = render(&mut app, width, height);
+            assert!(
+                screen
+                    .lines()
+                    .any(|line| line.contains(expected) && line.contains("linked"))
+            );
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+            let symbol = expected.chars().next().unwrap().to_string();
+            assert!(
+                terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .any(|cell| cell.symbol() == symbol && cell.fg == color)
+            );
+        }
+    }
+}

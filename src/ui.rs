@@ -1059,10 +1059,15 @@ fn draw_worktrees(frame: &mut Frame, app: &App) {
     ])
     .split(inside);
     frame.render_widget(
-        Paragraph::new(truncate(
-            &display_name(manager.common_dir.as_os_str()),
-            inside.width as usize,
-        ))
+        Paragraph::new(vec![
+            Line::from(truncate(
+                &display_name(manager.common_dir.as_os_str()),
+                inside.width as usize,
+            )),
+            Line::from(
+                "✓ synced · * changes · ↑ ahead · ↓ behind · ◇ detached · ? unknown · … checking",
+            ),
+        ])
         .style(Style::default().fg(MUTED)),
         rows[0],
     );
@@ -1129,11 +1134,24 @@ fn draw_worktrees(frame: &mut Frame, app: &App) {
                 "detached HEAD"
             });
             ListItem::new(vec![
-                Line::from(format!(
-                    "{mark} {size:>10}  {}  {}",
-                    truncate(label, 22),
-                    flags.join(" · ")
-                )),
+                Line::from(vec![
+                    Span::raw(format!("{mark} ")),
+                    Span::styled(
+                        row.icons(),
+                        Style::default().fg(if row.synced() {
+                            ACCENT
+                        } else if !row.measured || row.error.is_some() || !row.registered {
+                            MUTED
+                        } else {
+                            WARN
+                        }),
+                    ),
+                    Span::raw(format!(
+                        " {size:>10}  {}  {}",
+                        truncate(label, 22),
+                        flags.join(" · ")
+                    )),
+                ]),
                 Line::from(Span::styled(
                     format!("   {}", display_name(row.record.path.as_os_str())),
                     Style::default().fg(MUTED),
@@ -1148,7 +1166,7 @@ fn draw_worktrees(frame: &mut Frame, app: &App) {
             .position(|row| row.record.path == manager.selected),
     );
     frame.render_stateful_widget(
-        List::new(entries).highlight_style(Style::default().bg(SELECTED).fg(ACCENT)),
+        List::new(entries).highlight_style(Style::default().bg(SELECTED).bold()),
         rows[1],
         &mut state,
     );
