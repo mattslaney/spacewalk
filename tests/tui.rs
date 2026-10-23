@@ -935,6 +935,107 @@ fn git_panel_options_default_off_and_remote_actions_explain_missing_upstream() {
 }
 
 #[test]
+fn git_reports_stay_in_the_panel_and_return_to_the_same_menu_options() {
+    use spacewalk::git_actions::GitCommand;
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    fs::write(
+        dir.path().join("report.txt"),
+        "new staged line\n".repeat(200),
+    )
+    .unwrap();
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "report.txt"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('f'));
+    for (shortcut, command) in [
+        ('i', GitCommand::Status),
+        ('d', GitCommand::Diff),
+        ('v', GitCommand::Branches),
+        ('u', GitCommand::LocalCommits),
+        ('z', GitCommand::Stashes),
+        ('F', GitCommand::Fetch),
+    ] {
+        key(&mut app, KeyCode::Char(shortcut));
+        wait(&mut app);
+        assert!(
+            matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.options.force && panel.report.as_ref().is_some_and(|(c, _)| *c == command))
+        );
+        assert_eq!(app.modal_scroll, 0);
+        for (width, height) in [(120, 42), (60, 20), (30, 10)] {
+            let screen = render(&mut app, width, height);
+            if width >= 60 && height >= 20 {
+                assert!(screen.contains(command.label()));
+            } else {
+                assert!(screen.contains("Resize to at least"));
+            }
+        }
+        key(&mut app, KeyCode::PageDown);
+        let _ = render(&mut app, 60, 20);
+        if command == GitCommand::Diff {
+            key(&mut app, KeyCode::End);
+            let _ = render(&mut app, 60, 20);
+            let end = app.modal_scroll;
+            assert!(end > 0 && end < u16::MAX);
+            key(&mut app, KeyCode::Up);
+            assert_eq!(app.modal_scroll, end - 1);
+        }
+        for action in ['c', 'r', 'p', 'P', 'y', 'f'] {
+            key(&mut app, KeyCode::Char(action));
+        }
+        assert!(app.git_action.is_none());
+        assert!(dir.path().join("report.txt").exists());
+        key(&mut app, KeyCode::Esc);
+        assert!(
+            matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.report.is_none() && panel.options.force)
+        );
+        assert_eq!(app.modal_scroll, 0);
+    }
+    key(&mut app, KeyCode::Esc);
+    assert!(app.modal.is_none());
+    wait(&mut app);
+}
+
+#[test]
+fn failed_fetch_returns_to_the_git_menu_and_inspection_shortcuts_work_in_reports() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["remote", "add", "origin", "./missing-remote.git"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('F'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.report.as_ref().unwrap().1.contains("failed"))
+    );
+    key(&mut app, KeyCode::Char('i'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.report.as_ref().unwrap().1.contains("Branch: main"))
+    );
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.report.is_none()));
+}
+
+#[test]
 fn git_cleanup_requires_explicit_confirmation_and_refreshes_the_view() {
     let (dir, mut app) = fixture();
     init_git_fixture(dir.path());

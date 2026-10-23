@@ -161,7 +161,7 @@ To set aside a known large item such as `target/`, select it and press `h`. The 
 
 Press `h` on a hidden item to show it again, or `H` to restore everything. Showing a child also reveals any hidden ancestors, while independently hidden siblings stay hidden. Visibility choices survive rescans during the current session, including new files added within a hidden directory. Hiding items never changes files on disk.
 
-## Git sync and cleanup
+## Git inspection, sync and cleanup
 
 Press `Ctrl+g` on a repository or an item inside it to open the floating action
 panel. This also works when scanning a directory inside a larger repository.
@@ -169,6 +169,12 @@ The panel shows the repository, current branch, and configured upstream.
 
 | Panel key | Action |
 | --- | --- |
+| i | Show Status: branch, staged, unstaged, and untracked changes |
+| d | Show Diff: file summaries and patches for unstaged and staged changes |
+| v | Show local Branches and their upstream tracking state |
+| u | Show Local commits: current-branch commits absent from its last-fetched upstream |
+| z | List repository-wide Stashes |
+| F | Fetch configured remotes and refresh Git indicators |
 | p / P | Preview Pull / Push |
 | c | Preview Clean checkout |
 | r | Preview Reset to remote |
@@ -177,9 +183,19 @@ The panel shows the repository, current branch, and configured upstream.
 | b | Toggle deleting other local branches during Reset (default: off) |
 | s | Toggle clearing repository-wide stashes during Reset (default: off) |
 
-Every action opens a scrollable preview. Press `y` to execute; Enter, `n`, or Esc
-cancels. Preparation may fetch remote references, but checkout changes, deletion,
-and pushes require confirmation. If the repository changes after the preview,
+Inspection opens immediately in the floating panel. Use arrows, PageUp/PageDown,
+or Home/End to scroll; Esc or Enter returns to the Git menu with its options
+preserved. The inspection shortcuts also work inside reports. Each output section
+is limited to 1,000 lines or 128 KiB; Local commits shows at most 200 commits.
+Diff includes tracked files; use Status to see untracked files.
+
+Fetch runs immediately with live progress, updates remote-tracking refs without
+merging, and refreshes the indicators. It does not prune refs or fetch tags or
+submodules. Inspection uses local data and does not contact remotes.
+
+Pull, Push, Clean checkout, and Reset to remote open scrollable previews. Press
+`y` to execute; Enter, `n`, or Esc cancels. Preparation may fetch remote references,
+but checkout changes, deletion, and pushes require confirmation. If the repository changes after the preview,
 Spacewalk asks for a fresh preview.
 
 **Pull** fetches the configured upstream and fast-forwards to its previewed commit.

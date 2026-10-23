@@ -659,7 +659,7 @@ fn draw_legend(frame: &mut Frame, b: &Browser, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_modal(frame: &mut Frame, app: &App) {
+fn draw_modal(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let Some(modal) = app.modal.as_ref() else {
         return;
@@ -670,17 +670,27 @@ fn draw_modal(frame: &mut Frame, app: &App) {
     }
     let (title, text, warning) = match modal {
         Modal::Progress => unreachable!(),
+        Modal::GitPanel(panel) if panel.report.is_some() => {
+            let (command, text) = panel.report.as_ref().unwrap();
+            (
+                command.label(),
+                format!(
+                    "↑/↓ PgUp/PgDn Home/End scroll · Esc returns to Git menu\ni Status · d Diff · v Branches · u Local commits · z Stashes · F Fetch\n\n{text}"
+                ),
+                false,
+            )
+        }
         Modal::GitPanel(panel) => {
             let repo = &panel.repository;
             let enabled = |value| if value { "x" } else { " " };
             (
                 " GIT ACTIONS ",
                 format!(
-                    "p Pull · P Push · c Clean checkout · r Reset to remote\n\nRepository: {}\nBranch: {}\nUpstream: {}\n\nOPTIONS (off by default)\nf [{}] Force Push with lease\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\n\n{}\nEach action opens a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\nPgUp/PgDn scroll · Esc closes",
+                    "i Status · d Diff · v Branches · u Local commits · z Stashes\nF Fetch remotes and refresh comparisons\n\np Pull · P Push · c Clean checkout · r Reset to remote\n\nRepository: {}\nBranch: {}\nUpstream: {}\n\nOPTIONS (off by default)\nf [{}] Force Push with lease\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\n\n{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
                     display_name(repo.root.as_os_str()),
                     repo.branch.as_deref().unwrap_or("detached"),
                     repo.upstream.as_ref().map_or_else(
-                        || "not configured (remote actions disabled)".into(),
+                        || "not configured (Pull/Push/Reset disabled)".into(),
                         |u| format!("{} / {}", u.remote, u.remote_ref)
                     ),
                     enabled(panel.options.force),
@@ -860,6 +870,7 @@ fn draw_modal(frame: &mut Frame, app: &App) {
     );
     let scroll =
         usize::from(app.modal_scroll).min(lines.saturating_sub(inside.height as usize)) as u16;
+    app.modal_scroll = scroll;
     frame.render_widget(
         Paragraph::new(text)
             .style(Style::default().fg(TEXT))

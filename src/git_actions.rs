@@ -1,4 +1,4 @@
-//! Explicit Git mutations, isolated from the short-lived, read-only status worker.
+//! On-demand Git reports and mutations, isolated from the automatic status worker.
 use crate::{
     display_name,
     files::Directory,
@@ -35,6 +35,29 @@ impl GitAction {
             Self::Push => "Push",
             Self::Clean => "Clean checkout",
             Self::Reset => "Reset to remote",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitCommand {
+    Status,
+    Diff,
+    Branches,
+    LocalCommits,
+    Stashes,
+    Fetch,
+}
+
+impl GitCommand {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Status => "Status",
+            Self::Diff => "Diff",
+            Self::Branches => "Branches",
+            Self::LocalCommits => "Local commits",
+            Self::Stashes => "Stashes",
+            Self::Fetch => "Fetch",
         }
     }
 }
@@ -97,6 +120,10 @@ pub struct GitPreview {
 
 pub enum GitJob {
     Inspect(PathBuf),
+    Report {
+        path: PathBuf,
+        command: GitCommand,
+    },
     Preview {
         path: PathBuf,
         action: GitAction,
@@ -107,6 +134,10 @@ pub enum GitJob {
 pub enum GitEvent {
     Progress(String),
     Inspected(Result<Repository, String>),
+    Reported {
+        command: GitCommand,
+        result: Result<String, String>,
+    },
     Previewed(Result<Box<GitPreview>, String>),
     Finished(Result<String, String>),
 }
@@ -127,6 +158,10 @@ impl GitActionTask {
             };
             let event = match job {
                 GitJob::Inspect(path) => GitEvent::Inspected(inspect_with(&path, &runner)),
+                GitJob::Report { path, command } => GitEvent::Reported {
+                    command,
+                    result: report_with(&path, command, &runner),
+                },
                 GitJob::Preview { path, action, options } => GitEvent::Previewed(prepare_with(&path, action, options, &runner).map(Box::new)),
                 GitJob::Execute(preview) => GitEvent::Finished(execute_with(&preview, &runner).map_err(|e| format!("{e}\n\nSome steps may have completed. Refresh and review before retrying."))),
             };
@@ -148,6 +183,9 @@ fn command(root: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .args([
+            "--no-pager",
+            "-c",
+            "color.status=false",
             "-c",
             "core.fsmonitor=false",
             "-c",
@@ -219,6 +257,9 @@ impl Runner<'_> {
         self.check()?;
         self.progress(visible(format!("git {}", args.join(" ")).as_bytes()));
         let mut cmd = command(root);
+        if matches!(args.first(), Some(&"status" | &"diff" | &"log")) {
+            cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        }
         if matches!(args.first(), Some(&"fetch" | &"push" | &"ls-remote")) {
             // Preserve configured SSH identities/options, while preventing an unseen
             // terminal passphrase prompt. Interactive auth remains in the shell.
@@ -469,6 +510,133 @@ pub fn inspect(path: &Path, cancel: &AtomicBool) -> Result<Repository, String> {
             events: None,
         },
     )
+}
+
+/// Keep reports small enough to wrap and scroll responsively in a floating panel.
+fn report_output(bytes: &[u8], empty: &str) -> String {
+    let text = visible(bytes);
+    if text.trim().is_empty() {
+        return empty.into();
+    }
+    let mut output = String::new();
+    for (index, line) in text.lines().enumerate() {
+        if index >= 1000 || output.len() + line.len() > 128 * 1024 {
+            output.push_str("\n[Display limited; use the shell for the full output.]\n");
+            break;
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    output
+}
+
+pub fn report(path: &Path, command: GitCommand, cancel: &AtomicBool) -> Result<String, String> {
+    report_with(
+        path,
+        command,
+        &Runner {
+            cancel,
+            events: None,
+        },
+    )
+}
+
+fn report_with(path: &Path, command: GitCommand, runner: &Runner<'_>) -> Result<String, String> {
+    let repo = inspect_with(path, runner)?;
+    let root = &repo.root;
+    let mut text = format!(
+        "Repository: {}\nBranch: {}\n\n",
+        display_name(root.as_os_str()),
+        repo.branch.as_deref().unwrap_or("detached HEAD"),
+    );
+    match command {
+        GitCommand::Status => {
+            text.push_str(&report_output(
+                &runner.run(
+                    root,
+                    &[
+                        "status",
+                        "--short",
+                        "--branch",
+                        "--show-stash",
+                        "--untracked-files=normal",
+                    ],
+                )?,
+                "Clean working tree.",
+            ));
+            text.push_str("\nFile columns: index / working tree; ?? means untracked.\nRemote comparisons use last-fetched refs; F Fetch updates them.");
+        }
+        GitCommand::Diff => {
+            // Ignore external diff/text conversion tools and terminal color settings.
+            // Show both sections even when one patch exceeds the display limit.
+            for (heading, cached) in [("UNSTAGED CHANGES", false), ("STAGED CHANGES", true)] {
+                let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
+                if cached {
+                    args.push("--cached");
+                }
+                text.push_str(heading);
+                text.push('\n');
+                args.push("--stat");
+                text.push_str(&report_output(&runner.run(root, &args)?, "No changes.\n"));
+                args.pop();
+                args.push("--patch");
+                text.push_str(&report_output(&runner.run(root, &args)?, ""));
+                text.push('\n');
+            }
+            text.push_str("Untracked files are listed in Status; they are not included in Diff.");
+        }
+        GitCommand::Branches => {
+            text.push_str(&report_output(
+                &runner.run(root, &["branch", "--list", "-vv", "--no-color"])?,
+                "No local branches yet.\n",
+            ));
+            text.push_str("\n* current branch; + checked out in another worktree.\nTracking information uses last-fetched refs; F Fetch updates them.");
+        }
+        GitCommand::LocalCommits => {
+            if repo.head.is_none() {
+                text.push_str("No commits yet.");
+            } else if let Some(upstream) = &repo.upstream {
+                text.push_str("Current-branch commits absent from its upstream (last-fetched refs).\nAt most 200 commits are shown. F Fetch updates the comparison.\n\n");
+                text.push_str(&report_output(&runner.run(root, &[
+                    "log", "--oneline", "--no-decorate", "--no-color", "--no-show-signature",
+                    "-200", &format!("{}..HEAD", upstream.tracking_ref), "--",
+                ]).map_err(|error| format!("Cannot compare with the upstream. Try F Fetch, then reopen Local commits.\n{error}"))?, "No local commits ahead of the upstream."));
+            } else {
+                text.push_str("No remote upstream is configured for the current branch, or HEAD is detached.\nCheck Branches for other local work; configure an upstream in the shell to compare commits.");
+            }
+        }
+        GitCommand::Stashes => {
+            text.push_str("Saved changes shared by this repository and its linked worktrees.\n\n");
+            text.push_str(&report_output(
+                &runner.run(root, &["stash", "list", "--no-color", "--format=%gd %s"])?,
+                "No stashes.",
+            ));
+        }
+        GitCommand::Fetch => {
+            if runner.run(root, &["remote"])?.is_empty() {
+                text.push_str("No remotes configured. Add a remote in the shell before fetching.");
+            } else {
+                runner.run(
+                    root,
+                    &[
+                        "fetch",
+                        "--all",
+                        "--progress",
+                        "--no-tags",
+                        "--no-prune",
+                        "--no-prune-tags",
+                        "--no-recurse-submodules",
+                    ],
+                )?;
+                text.push_str("Fetch complete. Remote comparisons have been refreshed.\n\n");
+                text.push_str(&report_output(
+                    &runner.run(root, &["status", "--short", "--branch"])?,
+                    "Clean working tree.",
+                ));
+            }
+        }
+    }
+    Ok(text)
 }
 
 fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprint, String> {
