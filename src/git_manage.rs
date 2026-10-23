@@ -156,13 +156,24 @@ pub(crate) fn reclaim_summary(
     repo: &Repository,
     runner: &Runner<'_>,
 ) -> Result<ReclaimSummary, String> {
+    reclaim_summary_with_files(repo, runner, None)
+}
+
+fn reclaim_summary_with_files(
+    repo: &Repository,
+    runner: &Runner<'_>,
+    supplied: Option<worktrees::LocalState>,
+) -> Result<ReclaimSummary, String> {
     let local = runner.local();
     let runner = &local;
     let root = &repo.root;
     let files = if repo.bare {
         None
     } else {
-        Some(worktrees::local_state(root, runner)?)
+        Some(match supplied {
+            Some(files) => files,
+            None => worktrees::local_state(root, runner)?,
+        })
     };
     let ignored_items = if repo.bare {
         0
@@ -445,18 +456,9 @@ pub(crate) fn load(
     let runner = &local;
     let repository = git_actions::inspect_root(path, runner)?;
     if command == GitCommand::Status && !repository.bare {
-        let summary = reclaim_summary(&repository, runner);
-        let text = if let Ok(summary) = &summary {
-            git_actions::status_text(
-                &repository,
-                summary
-                    .files
-                    .as_ref()
-                    .ok_or("Checkout status is unavailable")?,
-            )
-        } else {
-            git_actions::report_with(path, command, runner)?
-        };
+        let status = worktrees::checkout_status(path, runner)?;
+        let summary = reclaim_summary_with_files(&repository, runner, Some(status.summary.clone()));
+        let text = git_actions::status_text(&repository, &status);
         return Ok(Report {
             repository,
             text,
@@ -487,6 +489,7 @@ pub enum Action {
     Push(Branch),
     PushHead(String),
     DeleteBranch(Branch),
+    Checkout(Branch),
     DropStash(Stash),
 }
 impl Action {
@@ -495,6 +498,7 @@ impl Action {
             Self::Sync(_) => "Sync branch",
             Self::Push(_) | Self::PushHead(_) => "Push branch",
             Self::DeleteBranch(_) => "Delete local branch",
+            Self::Checkout(_) => "Checkout branch",
             Self::DropStash(_) => "Delete stash",
         }
     }
@@ -567,6 +571,57 @@ fn branch_now(repo: &Repository, selected: &Branch, runner: &Runner<'_>) -> Resu
     }
     Ok(current)
 }
+
+fn checkout_ready(repo: &Repository, branch: &Branch, runner: &Runner<'_>) -> Result<(), String> {
+    if repo.bare {
+        return Err("Select a working checkout before switching branches.".into());
+    }
+    if repo.branch.as_deref() == Some(&branch.name) {
+        return Err("This checkout is already on the selected branch.".into());
+    }
+    if branch.checkout.is_some() || branch.busy {
+        return Err(
+            "The selected branch is checked out elsewhere or in use by another Git operation."
+                .into(),
+        );
+    }
+    if worktrees::local_state(&repo.root, runner)?.dirty() {
+        return Err("Checkout requires a clean working tree: resolve staged, unstaged, untracked or conflicted files first. Use i Status or t Shell.".into());
+    }
+    let mut raw = runner.run(&repo.root, &["rev-parse", "--absolute-git-dir"])?;
+    if raw.last() == Some(&b'\n') {
+        raw.pop();
+    }
+    let directory = worktrees::os_path(&raw);
+    for marker in [
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "rebase-merge",
+        "rebase-apply",
+        "sequencer",
+        "BISECT_START",
+    ] {
+        match fs::symlink_metadata(directory.join(marker)) {
+            Ok(_) => return Err("Finish or abort the current Git operation in the shell before checking out a branch.".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(format!("Cannot verify checkout operation state: {error}")),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn checkout_with(
+    path: &Path,
+    branch: Branch,
+    runner: &Runner<'_>,
+) -> Result<Report, String> {
+    let preview = prepare_with(path, Action::Checkout(branch), runner)?;
+    execute_with(&preview, runner)?;
+    load(path, GitCommand::Branches, runner).map_err(|error| {
+        format!("Checkout completed, but refreshing the branch list failed: {error}")
+    })
+}
 pub(crate) fn prepare_with(
     path: &Path,
     action: Action,
@@ -591,6 +646,11 @@ pub(crate) fn prepare_with(
     let mut target = None;
     match &action {
         Action::PushHead(_) => unreachable!(),
+        Action::Checkout(selected) => {
+            let branch = branch_now(&repo, selected, runner)?;
+            checkout_ready(&repo, &branch, runner)?;
+            text.push_str(&format!("\nCheckout local branch: {}\nCommit: {}\nOnly a clean checkout may switch. No force, automatic stash, remote guessing or recursive submodule updates. Ignored files are protected from overwriting.\n", branch.name, branch.oid));
+        }
         Action::DropStash(stash) => {
             if !stashes(path, runner)?.contains(stash) {
                 return Err("Selected stash changed; refresh the list".into());
@@ -740,6 +800,21 @@ pub(crate) fn execute_with(preview: &Preview, runner: &Runner<'_>) -> Result<Str
     }
     match &preview.action {
         Action::PushHead(_) => unreachable!(),
+        Action::Checkout(selected) => {
+            let branch = branch_now(&repo, selected, runner)?;
+            checkout_ready(&repo, &branch, runner)?;
+            runner.run(
+                root,
+                &[
+                    "switch",
+                    "--no-guess",
+                    "--no-overwrite-ignore",
+                    "--no-recurse-submodules",
+                    "--",
+                    &branch.name,
+                ],
+            )?;
+        }
         Action::DropStash(stash) => {
             if !stashes(root, runner)?.contains(stash) {
                 return Err("Stash list changed since preview".into());

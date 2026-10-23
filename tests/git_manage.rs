@@ -386,7 +386,7 @@ fn cancellation_and_a_changed_commit_list_never_publish_unreviewed_commits() {
     );
 }
 #[test]
-fn status_is_only_a_cleanliness_and_ahead_behind_summary() {
+fn status_includes_cleanliness_counts_and_file_groups() {
     let f = Fixture::new();
     let clean = git_actions::report(&f.root, GitCommand::Status, &AtomicBool::new(false)).unwrap();
     assert!(clean.contains("Worktree: CLEAN"));
@@ -397,7 +397,9 @@ fn status_is_only_a_cleanliness_and_ahead_behind_summary() {
     let dirty = git_actions::report(&f.root, GitCommand::Status, &AtomicBool::new(false)).unwrap();
     assert!(dirty.contains("Worktree: DIRTY"));
     assert!(dirty.contains("Ahead: 1"));
-    assert!(!dirty.contains("private-name"));
+    assert!(dirty.contains("UNTRACKED (1)"));
+    assert!(dirty.contains("private-name"));
+    assert!(!dirty.contains("not included"));
 }
 
 #[test]
@@ -447,6 +449,12 @@ fn branches_in_interrupted_rebases_cannot_be_deleted_or_synced() {
         .output()
         .unwrap();
     assert!(!rebase.status.success());
+    let status = f.read(GitCommand::Status);
+    assert!(status.text.contains("UNMERGED / CONFLICTED (1)"));
+    assert_eq!(
+        status.summary.unwrap().unwrap().files.unwrap().conflicted,
+        1
+    );
     let selected = f.branch("topic");
     assert!(
         selected.busy,
@@ -500,6 +508,16 @@ fn branches_under_bisection_are_kept_even_with_a_detached_head() {
     commit(&f.root, "middle");
     commit(&f.root, "latest");
     git(&f.root, &["bisect", "start", "HEAD", "HEAD~2"]);
+    git(&f.root, &["branch", "other"]);
+    assert!(
+        git_manage::prepare(
+            &f.root,
+            Action::Checkout(f.branch("other")),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("current Git operation")
+    );
     let branch = f.branch("main");
     assert!(branch.busy);
     assert!(branch.checkout.is_none());
@@ -580,4 +598,166 @@ fn reclaim_summary_accounts_for_detached_heads_and_missing_remote_refs() {
     assert!(bare.files.is_none());
     assert_eq!(bare.ignored_items, 0);
     assert!(!bare.has_remote_refs);
+}
+
+#[test]
+fn status_groups_file_changes_and_escapes_unusual_paths_without_showing_contents() {
+    let f = Fixture::new();
+    fs::write(f.root.join("old name"), "rename content").unwrap();
+    fs::write(f.root.join("delete-me"), "delete content").unwrap();
+    git(&f.root, &["add", "."]);
+    git(&f.root, &["commit", "-m", "files"]);
+    git(&f.root, &["mv", "old name", "new name"]);
+    git(&f.root, &["rm", "delete-me"]);
+    fs::write(f.root.join("tracked"), "staged secret contents").unwrap();
+    git(&f.root, &["add", "tracked"]);
+    fs::write(f.root.join("tracked"), "unstaged secret contents").unwrap();
+    fs::write(f.root.join("new staged"), "new contents").unwrap();
+    git(&f.root, &["add", "new staged"]);
+    fs::write(f.root.join("untracked space"), "private").unwrap();
+    fs::write(f.root.join("line\nbreak"), "private").unwrap();
+    fs::write(f.root.join("escape-\x1b-name"), "private").unwrap();
+    let index = fs::read(f.root.join(".git/index")).unwrap();
+    let refs = git(&f.root, &["show-ref"]);
+    let report = git_actions::report(&f.root, GitCommand::Status, &AtomicBool::new(false)).unwrap();
+    let (staged, rest) = report.split_once("\nUNSTAGED").unwrap();
+    let (unstaged, untracked) = rest.split_once("\nUNTRACKED").unwrap();
+    assert!(staged.contains("modified: tracked"));
+    assert!(staged.contains("new file: \"new staged\""));
+    assert!(staged.contains("deleted: delete-me"));
+    assert!(staged.contains("renamed: \"old name\" -> \"new name\""));
+    assert!(unstaged.contains("modified: tracked"));
+    assert!(!unstaged.contains("new staged"));
+    assert!(untracked.contains("\"untracked space\""));
+    assert!(untracked.contains("\"line\\nbreak\""));
+    assert!(!report.contains('\x1b'));
+    assert!(!report.contains("secret contents"));
+    assert!(!report.contains("rename content"));
+    assert_eq!(fs::read(f.root.join(".git/index")).unwrap(), index);
+    assert_eq!(git(&f.root, &["show-ref"]), refs);
+}
+
+#[test]
+fn checkout_switches_clean_checkouts_without_fetching_or_changing_branch_refs() {
+    let f = Fixture::new();
+    git(&f.root, &["switch", "-c", "topic"]);
+    fs::write(f.root.join("tracked"), "topic data").unwrap();
+    git(&f.root, &["commit", "-am", "topic"]);
+    git(&f.root, &["switch", "main"]);
+    git(
+        &f.root,
+        &["remote", "set-url", "origin", "/missing/no-network.git"],
+    );
+    let refs = git(&f.root, &["show-ref"]);
+    f.prepare(Action::Checkout(f.branch("topic")))
+        .execute(&AtomicBool::new(false))
+        .unwrap();
+    assert_eq!(git(&f.root, &["symbolic-ref", "--short", "HEAD"]), "topic");
+    assert_eq!(
+        fs::read_to_string(f.root.join("tracked")).unwrap(),
+        "topic data"
+    );
+    assert_eq!(git(&f.root, &["show-ref"]), refs);
+    assert!(
+        git_manage::prepare(
+            &f.root,
+            Action::Checkout(f.branch("topic")),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("already on")
+    );
+}
+
+#[test]
+fn checkout_requires_no_staged_unstaged_or_untracked_files_and_rechecks_before_switching() {
+    let f = Fixture::new();
+    git(&f.root, &["branch", "topic"]);
+    fs::write(f.root.join("untracked"), "keep").unwrap();
+    assert!(
+        git_manage::prepare(
+            &f.root,
+            Action::Checkout(f.branch("topic")),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("clean working tree")
+    );
+    fs::remove_file(f.root.join("untracked")).unwrap();
+    fs::write(f.root.join("tracked"), "dirty").unwrap();
+    assert!(
+        git_manage::prepare(
+            &f.root,
+            Action::Checkout(f.branch("topic")),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("clean working tree")
+    );
+    git(&f.root, &["add", "tracked"]);
+    assert!(
+        git_manage::prepare(
+            &f.root,
+            Action::Checkout(f.branch("topic")),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("clean working tree")
+    );
+    git(&f.root, &["reset", "--hard"]);
+    let preview = f.prepare(Action::Checkout(f.branch("topic")));
+    fs::write(f.root.join("tracked"), "changed after preparation").unwrap();
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("clean working tree")
+    );
+    assert_eq!(git(&f.root, &["symbolic-ref", "--short", "HEAD"]), "main");
+    assert_eq!(
+        fs::read_to_string(f.root.join("tracked")).unwrap(),
+        "changed after preparation"
+    );
+}
+
+#[test]
+fn checkout_protects_other_worktrees_and_ignored_file_collisions() {
+    let f = Fixture::new();
+    git(&f.root, &["switch", "-c", "topic"]);
+    fs::write(f.root.join("local.env"), "tracked on topic").unwrap();
+    git(&f.root, &["add", "local.env"]);
+    git(&f.root, &["commit", "-m", "topic config"]);
+    git(&f.root, &["switch", "main"]);
+    fs::write(f.root.join(".git/info/exclude"), "local.env\n").unwrap();
+    fs::write(f.root.join("local.env"), "private local settings").unwrap();
+    let preview = f.prepare(Action::Checkout(f.branch("topic")));
+    assert!(preview.execute(&AtomicBool::new(false)).is_err());
+    assert_eq!(
+        fs::read_to_string(f.root.join("local.env")).unwrap(),
+        "private local settings"
+    );
+    assert_eq!(git(&f.root, &["symbolic-ref", "--short", "HEAD"]), "main");
+    fs::remove_file(f.root.join("local.env")).unwrap();
+    let preview = f.prepare(Action::Checkout(f.branch("topic")));
+    let other = f._temp.path().join("other");
+    git(
+        &f.root,
+        &["worktree", "add", other.to_str().unwrap(), "topic"],
+    );
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("changed since preview")
+    );
+    assert!(
+        git_manage::prepare(
+            &f.root,
+            Action::Checkout(f.branch("topic")),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("checked out elsewhere")
+    );
+    assert!(other.join("local.env").exists());
 }

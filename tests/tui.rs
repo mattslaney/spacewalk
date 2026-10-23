@@ -981,7 +981,7 @@ fn git_reports_stay_in_the_panel_and_return_to_the_same_menu_options() {
         }
         key(&mut app, KeyCode::PageDown);
         let _ = render(&mut app, 60, 20);
-        for action in ['c', 'P', 'y', 'f'] {
+        for action in ['P', 'y', 'f'] {
             key(&mut app, KeyCode::Char(action));
         }
         assert!(app.git_action.is_none());
@@ -2000,7 +2000,7 @@ fn git_status_uses_colors_and_shell_returns_to_the_same_git_context() {
         assert_eq!(buffer[(x, y)].fg, expected);
     }
     assert!(
-        matches!(&app.modal, Some(Modal::GitPanel(panel)) if !panel.report.as_ref().unwrap().1.contains("notes.txt"))
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.report.as_ref().unwrap().1.contains("notes.txt"))
     );
     key(&mut app, KeyCode::Char('t'));
     assert_eq!(app.shell.take().unwrap().directory, dir.path());
@@ -2087,4 +2087,66 @@ fn git_home_leads_with_local_risk_and_cleanup_consequences_and_refreshes_locally
         matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.options.discard_commits && !panel.summary.as_ref().unwrap().has_remote_refs)
     );
     assert!(render(&mut app, 120, 42).contains("UNVERIFIED"));
+}
+
+#[test]
+fn branch_checkout_is_quick_refreshes_context_and_blocks_a_dirty_current_checkout() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    git_ui(dir.path(), &["switch", "-c", "topic"]);
+    fs::write(dir.path().join("notes.txt"), "topic data").unwrap();
+    git_ui(dir.path(), &["commit", "-am", "topic"]);
+    git_ui(dir.path(), &["switch", "main"]);
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('v'));
+    wait(&mut app);
+    key(&mut app, KeyCode::End);
+    assert!(render(&mut app, 60, 20).contains("Enter/c Checkout"));
+    let mut repeat = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(app.git_action.is_none());
+    key(&mut app, KeyCode::Char('c'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.repository.branch.as_deref() == Some("topic") && p.report.as_ref().unwrap().0 == spacewalk::git_actions::GitCommand::Branches)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+        "topic data"
+    );
+    fs::write(dir.path().join("notes.txt"), "dirty topic data").unwrap();
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.repository.branch.as_deref() == Some("topic") && p.error.as_ref().unwrap().contains("clean working tree") && !p.entries.is_empty())
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+        "dirty topic data"
+    );
+    key(&mut app, KeyCode::Char('i'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.report.as_ref().unwrap().1.contains("UNSTAGED (1)") && p.report.as_ref().unwrap().1.contains("modified: notes.txt"))
+    );
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        render(&mut app, width, height);
+    }
+    git_ui(dir.path(), &["restore", "notes.txt"]);
+    key(&mut app, KeyCode::Char('v'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.repository.branch.as_deref() == Some("main") && p.error.is_none())
+    );
+    assert_eq!(
+        git_ui(dir.path(), &["symbolic-ref", "--short", "HEAD"]),
+        "main"
+    );
 }

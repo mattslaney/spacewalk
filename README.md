@@ -193,7 +193,7 @@ its parent repository's branch and shared history are retained.
 
 | Panel key | Action |
 | --- | --- |
-| i | Show clean/dirty state and commits ahead/behind the upstream |
+| i | Show clean/dirty state, ahead/behind counts, and staged/unstaged/untracked paths |
 | v | Select local-only branches and branches with unpushed commits; sync or delete |
 | u | List commits on HEAD absent from fetched remote refs; push the branch |
 | z | Select and delete individual repository-wide stashes |
@@ -210,9 +210,12 @@ its parent repository's branch and shared history are retained.
 | b | Toggle deleting other local branches during Reset (default: off) |
 | s | Toggle clearing repository-wide stashes during Reset (default: off) |
 
-Status shows only checkout cleanliness and ahead/behind counts, without file
-listings. Counts use the configured upstream’s last-fetched refs; missing upstreams
-or refs show as unknown. Headers, labels, status values, commands and warnings use
+Status shows checkout cleanliness and ahead/behind counts, followed by separate
+Staged, Unstaged and Untracked path lists. Renames show their source and destination;
+unmerged paths appear in a separate conflict section. Names are escaped safely,
+file contents are not shown, and each section displays up to 1,000 paths. Counts
+use the configured upstream’s last-fetched refs; missing upstreams or refs show as
+unknown. Headers, labels, status values, commands and warnings use
 contrasting colors in floating panels. Use arrows, PageUp/PageDown or Home/End to
 scroll Status and previews; Esc or Enter returns to the Git menu.
 
@@ -222,8 +225,14 @@ Inspection shortcuts work across reports, and `t` opens a shell in the displayed
 repository or worktree. The same menu or list refreshes when the shell returns.
 Diff is available through the shell.
 
-In **Branches**, `s` previews Sync and `d`/Delete previews deleting the selected
-local branch. Sync fetches its upstream, fast-forwards if possible, then pushes
+In **Branches**, Enter or `c` immediately checks out the selected local branch and
+refreshes the list. Checkout requires the current checkout to have no staged,
+unstaged, untracked or conflicted paths, and no interrupted Git operation. It
+rechecks just before switching, protects ignored files from being overwritten,
+and refuses branches already checked out elsewhere. Checkout does not fetch,
+force, stash, or recursively update submodules.
+
+`s` previews Sync and `d`/Delete previews deleting the selected local branch. Sync fetches its upstream, fast-forwards if possible, then pushes
 pending commits. It never rebases or force-pushes. An unchecked branch can advance
 without changing the current checkout; a branch checked out in another worktree
 syncs there. Dirty checkouts cannot be fast-forwarded. Divergence requires the

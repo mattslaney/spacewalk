@@ -155,6 +155,10 @@ pub enum GitJob {
         action: crate::git_manage::Action,
     },
     ManageExecute(Box<crate::git_manage::Preview>),
+    Checkout {
+        path: PathBuf,
+        branch: crate::git_manage::Branch,
+    },
     WorktreePreview(crate::worktree_actions::WorktreeRequest),
     WorktreeExecute(Box<crate::worktree_actions::WorktreePreview>),
 }
@@ -164,6 +168,7 @@ pub enum GitEvent {
     Reported {
         command: GitCommand,
         result: Result<crate::git_manage::Report, String>,
+        refresh_disk: bool,
     },
     Previewed(Result<Box<GitPreview>, String>),
     ManagePreviewed(Result<Box<crate::git_manage::Preview>, String>),
@@ -192,6 +197,12 @@ impl GitActionTask {
                 GitJob::Report { path, command } => GitEvent::Reported {
                     command,
                     result: crate::git_manage::load(&path, command, &runner),
+                    refresh_disk: false,
+                },
+                GitJob::Checkout { path, branch } => {
+                    let result = crate::git_manage::checkout_with(&path, branch, &runner);
+                    let refresh_disk = result.is_ok() || result.as_ref().is_err_and(|error| error.starts_with("Checkout completed") || error.starts_with("git switch failed"));
+                    GitEvent::Reported { command: GitCommand::Branches, result, refresh_disk }
                 },
                 GitJob::InspectCheckout(path) => GitEvent::Inspected(inspect_checkout(&path, &runner).map(|repo| crate::git_manage::operations(repo, &runner))),
                 GitJob::Preview { path, action, options } => GitEvent::Previewed(inspect_checkout(&path, &runner).and_then(|_| prepare_with(&path, action, options, &runner)).map(Box::new)),
@@ -649,8 +660,9 @@ pub fn report(path: &Path, command: GitCommand, cancel: &AtomicBool) -> Result<S
     )
 }
 
-pub(crate) fn status_text(repo: &Repository, state: &crate::worktrees::LocalState) -> String {
-    format!(
+pub(crate) fn status_text(repo: &Repository, status: &crate::worktrees::CheckoutStatus) -> String {
+    let state = &status.summary;
+    let mut text = format!(
         "Repository: {}\nBranch: {}\n\nWorktree: {}\nUpstream: {}\nAhead: {}\nBehind: {}\n\nComparisons use last-fetched refs. F Fetch refreshes them.\n",
         display_name(repo.root.as_os_str()),
         repo.branch.as_deref().unwrap_or("detached HEAD"),
@@ -658,7 +670,33 @@ pub(crate) fn status_text(repo: &Repository, state: &crate::worktrees::LocalStat
         state.upstream.as_deref().unwrap_or("not configured"),
         state.ahead.map_or("unknown".into(), |n| n.to_string()),
         state.behind.map_or("unknown".into(), |n| n.to_string())
-    )
+    );
+    for (heading, paths) in [
+        ("STAGED", &status.staged),
+        ("UNSTAGED", &status.unstaged),
+        ("UNTRACKED", &status.untracked),
+    ] {
+        text.push_str(&format!("\n{heading} ({})\n", paths.len()));
+        if paths.is_empty() {
+            text.push_str("  (none)\n");
+        }
+        for path in paths.iter().take(1000) {
+            text.push_str(&format!("  {path}\n"));
+        }
+        if paths.len() > 1000 {
+            text.push_str("  [Display limited to 1,000 paths; use the shell for the full list.]\n");
+        }
+    }
+    if !status.conflicts.is_empty() {
+        text.push_str(&format!(
+            "\nUNMERGED / CONFLICTED ({})\n",
+            status.conflicts.len()
+        ));
+        for path in status.conflicts.iter().take(1000) {
+            text.push_str(&format!("  {path}\n"));
+        }
+    }
+    text
 }
 
 pub(crate) fn report_with(
@@ -681,8 +719,8 @@ pub(crate) fn report_with(
     );
     match command {
         GitCommand::Status => {
-            let state = crate::worktrees::local_state(root, runner)?;
-            return Ok(status_text(&repo, &state));
+            let status = crate::worktrees::checkout_status(root, runner)?;
+            return Ok(status_text(&repo, &status));
         }
         GitCommand::Branches | GitCommand::LocalCommits | GitCommand::Stashes => {
             return Ok(crate::git_manage::list(repo, command, runner)?.text);

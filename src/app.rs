@@ -438,7 +438,11 @@ impl App {
                             panel.error = None;
                             self.modal = Some(Modal::GitPanel(panel));
                         }
-                        GitEvent::Reported { command, result } => {
+                        GitEvent::Reported {
+                            command,
+                            result,
+                            refresh_disk,
+                        } => {
                             let mut panel = self.git_panel_return.take();
                             match result {
                                 Ok(report) => {
@@ -475,16 +479,27 @@ impl App {
                                 }
                                 Err(error) => {
                                     if let Some(panel) = panel.as_mut() {
-                                        panel.report = Some((command, error.clone()));
-                                        panel.entries.clear();
-                                        panel.error = None;
+                                        if panel.report.as_ref().is_some_and(|r| r.0 == command) {
+                                            panel.error = Some(error);
+                                        } else {
+                                            panel.report = Some((command, error));
+                                            panel.entries.clear();
+                                            panel.error = None;
+                                        }
                                     }
                                 }
                             }
                             if let Some(panel) = panel {
                                 self.modal = Some(Modal::GitPanel(panel));
                             }
-                            if command == GitCommand::Fetch {
+                            if refresh_disk
+                                && let Some(parent) = self.worktree_panel_return.as_mut()
+                            {
+                                parent.summary =
+                                    Err("Checkout changed. Press R to refresh the local summary."
+                                        .into());
+                            }
+                            if command == GitCommand::Fetch || refresh_disk {
                                 self.rescan();
                             }
                         }
@@ -1145,6 +1160,9 @@ impl App {
                 preview.action.label().into(),
                 display_name(preview.repository.root.as_os_str()),
             ),
+            GitJob::Checkout { path, .. } => {
+                ("Checkout branch".into(), display_name(path.as_os_str()))
+            }
             GitJob::WorktreePreview(request) => (
                 format!("Prepare {} preview", request.label()),
                 display_name(request.context().as_os_str()),
@@ -1156,7 +1174,9 @@ impl App {
         };
         if !matches!(&job, GitJob::Report { .. } | GitJob::InspectRoot(_)) {
             self.git = None;
-            self.git_panel_return = None;
+            if !matches!(&job, GitJob::Checkout { .. }) {
+                self.git_panel_return = None;
+            }
         }
         self.begin_operation(title, context, "Preparing Git action…");
         self.git_action = Some(GitActionTask::start(job));
@@ -1257,7 +1277,10 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter)
+        let close_report = matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+            || (key.code == KeyCode::Enter
+                && matches!(&self.modal, Some(Modal::GitPanel(panel)) if panel.report.as_ref().is_some_and(|r| r.0 != GitCommand::Branches)));
+        if close_report
             && let Some(Modal::GitPanel(panel)) = self.modal.as_mut()
             && panel.report.is_some()
         {
@@ -1336,6 +1359,22 @@ impl App {
             if key.code == KeyCode::Char('r') {
                 let command = panel.report.as_ref().unwrap().0;
                 self.load_git_report(command);
+                return;
+            }
+            if matches!(key.code, KeyCode::Enter | KeyCode::Char('c'))
+                && let Some(GitEntry::Branch(branch)) = panel.entries.get(panel.selected)
+            {
+                if self.scanning.is_some() || self.git_action.is_some() {
+                    panel.error =
+                        Some("Wait for the current operation before checking out a branch.".into());
+                    return;
+                }
+                let path = panel.repository.root.clone();
+                let branch = branch.clone();
+                if let Some(Modal::GitPanel(panel)) = self.modal.take() {
+                    self.git_panel_return = Some(panel);
+                }
+                self.start_git_job(GitJob::Checkout { path, branch });
                 return;
             }
             let action = match (panel.entries.get(panel.selected), key.code) {

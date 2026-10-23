@@ -133,6 +133,7 @@ pub struct LocalState {
     pub staged: usize,
     pub modified: usize,
     pub untracked: usize,
+    pub conflicted: usize,
     pub upstream: Option<String>,
     pub remote_upstream: bool,
     pub ahead: Option<u64>,
@@ -140,7 +141,7 @@ pub struct LocalState {
 }
 impl LocalState {
     pub fn dirty(&self) -> bool {
-        self.staged + self.modified + self.untracked > 0
+        self.staged + self.modified + self.untracked + self.conflicted > 0
     }
 
     pub fn synced(&self) -> bool {
@@ -152,7 +153,41 @@ impl LocalState {
     }
 }
 
-pub(crate) fn local_state(path: &Path, runner: &Runner<'_>) -> Result<LocalState, String> {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CheckoutStatus {
+    pub summary: LocalState,
+    pub staged: Vec<String>,
+    pub unstaged: Vec<String>,
+    pub untracked: Vec<String>,
+    pub conflicts: Vec<String>,
+}
+
+fn status_path(raw: &[u8]) -> String {
+    let path = os_path(raw);
+    let plain = path.to_string_lossy();
+    if raw.is_ascii()
+        && !plain
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '\\')
+    {
+        plain.into_owned()
+    } else {
+        format!("{:?}", path.as_os_str())
+    }
+}
+
+fn change_name(change: u8) -> &'static str {
+    match change {
+        b'A' => "new file",
+        b'D' => "deleted",
+        b'R' => "renamed",
+        b'C' => "copied",
+        b'T' => "type changed",
+        _ => "modified",
+    }
+}
+
+fn read_status(path: &Path, runner: &Runner<'_>, details: bool) -> Result<CheckoutStatus, String> {
     let raw = runner.run(
         path,
         &[
@@ -164,33 +199,90 @@ pub(crate) fn local_state(path: &Path, runner: &Runner<'_>) -> Result<LocalState
             "--ignore-submodules=none",
         ],
     )?;
+    parse_status(&raw, details)
+}
+
+fn parse_status(raw: &[u8], details: bool) -> Result<CheckoutStatus, String> {
+    let mut result = CheckoutStatus::default();
     let mut fields = raw.split(|&b| b == 0);
-    let mut result = LocalState::default();
     while let Some(field) = fields.next() {
         if let Some(value) = field.strip_prefix(b"# branch.upstream ") {
-            result.upstream = Some(String::from_utf8_lossy(value).into_owned());
+            result.summary.upstream = Some(String::from_utf8_lossy(value).into_owned());
         } else if let Some(value) = field.strip_prefix(b"# branch.ab ") {
             let values = String::from_utf8_lossy(value);
             let mut values = values.split_whitespace();
-            result.ahead = values
+            result.summary.ahead = values
                 .next()
-                .and_then(|value| value.strip_prefix('+'))
-                .and_then(|value| value.parse().ok());
-            result.behind = values
+                .and_then(|v| v.strip_prefix('+'))
+                .and_then(|v| v.parse().ok());
+            result.summary.behind = values
                 .next()
-                .and_then(|value| value.strip_prefix('-'))
-                .and_then(|value| value.parse().ok());
+                .and_then(|v| v.strip_prefix('-'))
+                .and_then(|v| v.parse().ok());
         } else if matches!(field.first(), Some(b'1' | b'2' | b'u')) {
-            result.staged += usize::from(field.get(2).is_some_and(|&b| b != b'.'));
-            result.modified += usize::from(field.get(3).is_some_and(|&b| b != b'.'));
-            if field.first() == Some(&b'2') {
-                fields.next();
+            let renamed = field.first() == Some(&b'2');
+            let conflict = field.first() == Some(&b'u');
+            let xy = field.get(2..4).ok_or("Cannot parse Git status columns")?;
+            let source = if renamed {
+                Some(fields.next().ok_or("Missing rename source in Git status")?)
+            } else {
+                None
+            };
+            if conflict {
+                result.summary.conflicted += 1;
+            } else {
+                result.summary.staged += usize::from(xy[0] != b'.');
+                result.summary.modified += usize::from(xy[1] != b'.');
             }
-        } else if field.starts_with(b"? ") {
-            result.untracked += 1;
+            if details {
+                let count = if renamed {
+                    10
+                } else if conflict {
+                    11
+                } else {
+                    9
+                };
+                let parts: Vec<_> = field.splitn(count, |&b| b == b' ').collect();
+                if parts.len() != count {
+                    return Err("Cannot parse Git status path".into());
+                }
+                let path = parts[count - 1];
+                let label = source.map_or_else(
+                    || status_path(path),
+                    |source| format!("{} -> {}", status_path(source), status_path(path)),
+                );
+                if conflict {
+                    result
+                        .conflicts
+                        .push(format!("{}: {label}", String::from_utf8_lossy(xy)));
+                } else {
+                    if xy[0] != b'.' {
+                        result
+                            .staged
+                            .push(format!("{}: {label}", change_name(xy[0])));
+                    }
+                    if xy[1] != b'.' {
+                        result
+                            .unstaged
+                            .push(format!("{}: {label}", change_name(xy[1])));
+                    }
+                }
+            }
+        } else if let Some(path) = field.strip_prefix(b"? ") {
+            result.summary.untracked += 1;
+            if details {
+                result.untracked.push(status_path(path));
+            }
         }
     }
     Ok(result)
+}
+
+pub(crate) fn local_state(path: &Path, runner: &Runner<'_>) -> Result<LocalState, String> {
+    Ok(read_status(path, runner, false)?.summary)
+}
+pub(crate) fn checkout_status(path: &Path, runner: &Runner<'_>) -> Result<CheckoutStatus, String> {
+    read_status(path, runner, true)
 }
 
 #[derive(Clone, Debug)]

@@ -669,6 +669,9 @@ fn styled_panel_line(line: String) -> Line<'static> {
         || line.contains("Force: ON")
         || line.contains("UNVERIFIED")
         || line.contains("UNKNOWN")
+        || line.starts_with("UNSTAGED")
+        || line.starts_with("UNTRACKED")
+        || line.starts_with("UNMERGED")
     {
         return Line::styled(line, Style::default().fg(WARN).bold());
     }
@@ -860,7 +863,7 @@ fn draw_git_list(frame: &mut Frame, app: &App) {
         );
     }
     let actions = match command {
-        GitCommand::Branches => "s Sync selected branch · d Delete selected branch",
+        GitCommand::Branches => "Enter/c Checkout · s Sync · d Delete",
         GitCommand::LocalCommits => "p Push branch (all pending commits)",
         GitCommand::Stashes => "d Delete selected stash (repository-wide)",
         _ => "",
@@ -958,10 +961,15 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
                 Ok(summary) => {
                     let files = if let Some(files) = &summary.files {
                         format!(
-                            "Checkout: {} ({} staged · {} modified)\nFiles outside Git: {}\n",
+                            "Checkout: {} ({} staged · {} modified{})\nFiles outside Git: {}\n",
                             if files.dirty() { "DIRTY" } else { "CLEAN" },
                             files.staged,
                             files.modified,
+                            if files.conflicted > 0 {
+                                format!(" · {} conflicted", files.conflicted)
+                            } else {
+                                String::new()
+                            },
                             if files.untracked == 0 && summary.ignored_items == 0 {
                                 "none".into()
                             } else {
@@ -1507,10 +1515,15 @@ fn draw_worktrees(frame: &mut Frame, app: &App) {
             crate::git_actions::visible(error.as_bytes())
         } else if let Some(state) = &row.state {
             format!(
-                "{} staged · {} modified · {} untracked · {} · ↑{} ↓{} (last fetched)",
+                "{} staged · {} modified · {} untracked{} · {} · ↑{} ↓{} (last fetched)",
                 state.staged,
                 state.modified,
                 state.untracked,
+                if state.conflicted > 0 {
+                    format!(" · {} conflicted", state.conflicted)
+                } else {
+                    String::new()
+                },
                 state.upstream.as_deref().unwrap_or("no upstream"),
                 state.ahead.map_or("?".into(), |n| n.to_string()),
                 state.behind.map_or("?".into(), |n| n.to_string())
