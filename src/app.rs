@@ -1132,6 +1132,13 @@ impl App {
                 b.zoom_in();
             }
             KeyCode::Backspace => b.zoom_out(),
+            KeyCode::Char('u')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                b.select_parent()
+            }
             KeyCode::Home | KeyCode::Char('g') => {
                 if let Some(row) = b.rows.first() {
                     b.selected = row.id;

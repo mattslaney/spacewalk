@@ -84,6 +84,7 @@ spacewalk --help
 | + / - | Expand / collapse all folders beneath the selected folder (tree focus) |
 | Enter | Zoom into the selected directory; on a map file, zoom into its parent |
 | Backspace | Zoom out one directory |
+| u | Select the current item's parent in either panel |
 | Home / End, g / G | First / last visible tree row |
 | PageUp / PageDown | Move a page through the tree |
 | / | Start live, case-insensitive name filtering |
@@ -115,6 +116,10 @@ survive rescans. Files and symlinks have no subtree to expand. Map focus keeps i
 existing navigation; switch to the tree with Tab before using these shortcuts.
 
 Click either panel to focus it and select an item. In the tree, click a directory's triangle to expand or collapse it. A map click expands the selected file's ancestors and scrolls it into view in the tree. Double-click a block to zoom into its parent directory; right-click the map to zoom out. The wheel over the tree moves its selection. Arrow keys and PageUp/PageDown scroll dialogs.
+
+Press `u` in either panel to select the selected item's parent, keeping the same
+panel focused. If the selected item is the zoomed view's root, the view moves up
+one level to reveal its parent. At the original scan root, `u` does nothing.
 
 Press `y` in either panel to copy the selected item's absolute path, including spaces and Unicode characters, without quotes or a trailing newline. Clipboard copying runs in the background and reports success or unavailability below the selection details. Linux needs `wl-copy` from `wl-clipboard` for Wayland, or `xclip`/`xsel` for X11, with access to the desktop session. macOS uses `pbcopy`; Windows uses PowerShell's `Set-Clipboard`. Clipboard support is optional; navigation continues normally when no clipboard is available.
 

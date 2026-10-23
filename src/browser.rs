@@ -419,6 +419,23 @@ impl Browser {
         }
     }
 
+    pub fn select_parent(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        if let Some(parent) = self.data.nodes[self.selected].parent {
+            // Reveal just the next level when moving above the zoomed scope.
+            if self.selected == self.scope {
+                self.scope = parent;
+                self.expanded.insert(parent);
+                self.collapsed.remove(&parent);
+                self.map_area = Rect::default();
+                self.scroll = 0;
+            }
+            self.select(parent);
+        }
+    }
+
     pub fn move_tree(&mut self, delta: isize) {
         if self.rows.is_empty() {
             return;
