@@ -3,6 +3,7 @@ pub mod browser;
 pub mod clipboard;
 pub mod delete;
 pub mod files;
+pub mod filters;
 pub mod git;
 pub mod git_actions;
 pub mod git_manage;

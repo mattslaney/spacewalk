@@ -11,7 +11,7 @@ use std::{
         mpsc::{self, Receiver},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 pub type NodeId = usize;
@@ -64,6 +64,8 @@ pub struct Node {
     pub error: Option<String>,
     pub hard_link: bool,
     pub identity: Identity,
+    /// Newest modification in this subtree; None if metadata is incomplete.
+    pub modified: Option<SystemTime>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -224,6 +226,7 @@ pub(crate) fn scan_excluding(
             error: None,
             hard_link: false,
             identity: Identity::of(&meta),
+            modified: meta.modified().ok(),
         }],
         root: root.clone(),
         errors: 0,
@@ -306,6 +309,7 @@ pub(crate) fn scan_excluding(
                 error: None,
                 hard_link,
                 identity,
+                modified: meta.modified().ok(),
             });
             snapshot.nodes[parent].children.push(id);
             if kind == Kind::Directory {
@@ -321,10 +325,21 @@ pub(crate) fn scan_excluding(
         }
     }
     for id in (1..snapshot.nodes.len()).rev() {
+        if snapshot.nodes[id].error.is_some() {
+            snapshot.nodes[id].modified = None;
+        }
         let node = &snapshot.nodes[id];
-        let (parent, size, files) = (node.parent.unwrap(), node.size, node.files);
+        let (parent, size, files, modified) =
+            (node.parent.unwrap(), node.size, node.files, node.modified);
+        snapshot.nodes[parent].modified = snapshot.nodes[parent]
+            .modified
+            .zip(modified)
+            .map(|(a, b)| a.max(b));
         snapshot.nodes[parent].size = snapshot.nodes[parent].size.saturating_add(size);
         snapshot.nodes[parent].files = snapshot.nodes[parent].files.saturating_add(files);
+    }
+    if snapshot.nodes[0].error.is_some() {
+        snapshot.nodes[0].modified = None;
     }
     snapshot.elapsed = started.elapsed();
     Ok(snapshot)

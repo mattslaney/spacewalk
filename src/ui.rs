@@ -174,23 +174,47 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else {
             "file size"
         };
+        let filter_line = if b.view_filters.active() {
+            Line::from(Span::styled(
+                format!(
+                    " FILTERS: {} · {} shown of {} · F2 edit / Esc clear",
+                    b.view_filters.label(),
+                    human_size(b.filtered_size(b.scope)),
+                    human_size(b.data.nodes[b.scope].size)
+                ),
+                Style::default().fg(WARN),
+            ))
+        } else {
+            Line::default()
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", human_size(total.size)),
-                    Style::default().fg(ACCENT).bold(),
-                ),
-                Span::styled(
-                    format!(
-                        "{measure}   {} files   {} dirs   {:.2}s",
-                        total.files,
-                        b.data.nodes.len() as u64 - total.files - 1,
-                        b.data.elapsed.as_secs_f64()
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!(" {} ", human_size(total.size)),
+                        Style::default().fg(ACCENT).bold(),
                     ),
-                    Style::default().fg(MUTED),
-                ),
-                Span::styled(errors, Style::default().fg(WARN)),
-            ])),
+                    Span::styled(
+                        format!(
+                            "{measure}   {} files   {} dirs   {:.2}s",
+                            total.files,
+                            b.data.nodes.len() as u64 - total.files - 1,
+                            b.data.elapsed.as_secs_f64()
+                        ),
+                        Style::default().fg(MUTED),
+                    ),
+                    Span::styled(
+                        if b.view_filters.active() {
+                            " full scan"
+                        } else {
+                            ""
+                        },
+                        Style::default().fg(MUTED),
+                    ),
+                    Span::styled(errors, Style::default().fg(WARN)),
+                ]),
+                filter_line,
+            ]),
             sections[1],
         );
         draw_tree(frame, b, sections[2], &mut app.hits);
@@ -198,7 +222,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_legend(frame, b, sections[4]);
         let selected = &b.data.nodes[b.selected];
         let path = display_name(b.data.path(b.selected).as_os_str());
-        let note = if b.is_hidden(b.selected) {
+        let note = if b.is_context(b.selected) {
+            format!(
+                "  {} matches · context only · F2 filters",
+                human_size(b.filtered_size(b.selected))
+            )
+        } else if b.is_hidden(b.selected) {
             "  hidden from map · h show · H show all".into()
         } else if b.visible_size(b.selected) < selected.size {
             format!(
@@ -323,9 +352,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else if marked > 0 {
             format!(" × {marked} marked · c copy · x cut · d delete · M clear")
         } else if area.width >= 100 {
-            " y path  c copy x cut p paste  a mkdir R rename  Ctrl+g Git  t shell  m mark  d del  ? help q".into()
+            " F2 filters  y path  c copy x cut p paste  a mkdir R rename  Ctrl+g Git  t shell  m mark  d del  ? help q".into()
         } else {
-            " y path c copy x cut p paste a mkdir R rename ^g Git ? q".into()
+            " F2 filters y path c copy x cut p paste a mkdir R rename ^g Git ? q".into()
         };
         frame.render_widget(
             Paragraph::new(keys).style(Style::default().fg(MUTED)),
@@ -376,7 +405,15 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
         format!(" · /{} · {count} matches", truncate(&b.query, 18))
     };
     let block = panel(
-        format!(" 1 FILE TREE · {}{match_info} ", b.sort.label()),
+        format!(
+            " 1 FILE TREE · {}{match_info}{} ",
+            b.sort.label(),
+            if b.view_filters.active() {
+                " · FILTERED [F2]"
+            } else {
+                ""
+            }
+        ),
         b.focus == Panel::Tree,
     );
     let inner = block.inner(area);
@@ -425,7 +462,7 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             (columns[0].width as usize).saturating_sub(5 + git_icons.width() + mark_icon.width()),
         );
         let marker = match node.kind {
-            Kind::Directory if b.expanded.contains(&row.id) || !b.query.is_empty() => "▾",
+            Kind::Directory if b.open_in_view(row.id) => "▾",
             Kind::Directory => "▸",
             Kind::Symlink => "↗",
             Kind::File => "·",
@@ -448,7 +485,12 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             if hidden { "[hidden] " } else { "" }
         );
         let name = format!(
-            "{name}{suffix}{}",
+            "{name}{suffix}{}{}",
+            if b.is_context(row.id) {
+                " [context]"
+            } else {
+                ""
+            },
             if node.error.is_some() { " !" } else { "" }
         );
         let name_style = if hidden {
@@ -473,7 +515,7 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             Rect::new(columns[0].x, y, columns[0].width, 1),
         );
         frame.render_widget(
-            Paragraph::new(format!("{:>10}", human_size(node.size))).style(style),
+            Paragraph::new(format!("{:>10}", human_size(b.filtered_size(row.id)))).style(style),
             Rect::new(columns[1].x, y, columns[1].width, 1),
         );
         let ratio = b.visible_size(row.id) as f64 / total;
@@ -498,7 +540,7 @@ fn draw_tree(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas
             Rect::new(columns[3].x, y, columns[3].width, 1),
         );
         frame.render_widget(
-            Paragraph::new(format!("{:>7}", node.files)).style(style),
+            Paragraph::new(format!("{:>7}", b.filtered_file_count(row.id))).style(style),
             Rect::new(columns[4].x, y, columns[4].width, 1),
         );
         hits.rows.push((y, row.id, columns[0].x + indent as u16));
@@ -536,7 +578,17 @@ fn draw_map(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas)
         display_name(&b.data.nodes[b.scope].name)
     };
     let hidden = b.hidden_in_scope();
-    let title = if hidden > 0 {
+    let title = if b.view_filters.active() {
+        format!(
+            " 2 SPACE MAP · FILTERED · {} shown{} [F2] ",
+            human_size(b.visible_size(b.scope)),
+            if hidden > 0 {
+                format!(" · {hidden} hidden [H]")
+            } else {
+                String::new()
+            }
+        )
+    } else if hidden > 0 {
         format!(
             " 2 SPACE MAP · {} shown · {hidden} hidden [H show all] ",
             human_size(b.visible_size(b.scope))
@@ -553,7 +605,9 @@ fn draw_map(frame: &mut Frame, b: &mut Browser, area: Rect, hits: &mut HitAreas)
     hits.map = inner;
     b.layout_map(inner);
     if b.map.leaves.is_empty() {
-        let message = if hidden > 0 {
+        let message = if b.view_filters.active() && b.filtered_size(b.scope) == 0 {
+            "\n No space matches the active age/size filters.\n F2 edits filters · Esc clears them."
+        } else if hidden > 0 {
             "\n No visible space to display.\n h toggles the selected item · H shows all hidden items."
         } else {
             "\n No space to display.\n Zero-byte files and empty directories remain in the tree."
@@ -903,6 +957,30 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         return;
     }
     let (title, text, warning) = match modal {
+        Modal::ViewFilters(input) => {
+            let field = |index, text: &str| {
+                if input.field == index {
+                    let cursor = input.cursor.min(text.len());
+                    format!("> {}│{}", &text[..cursor], &text[cursor..])
+                } else {
+                    format!("  {text}")
+                }
+            };
+            (
+                " AGE & SIZE FILTERS ",
+                format!(
+                    "Show matching items in BOTH the tree and space map.\nBoth criteria must match; blank / 0 disables a criterion.\n{error}\nMinimum size (e.g. 500MiB, 2GiB or 1.5GB):\n{size}\n\nNot modified for at least this many days (e.g. 90):\n{days}\n\nTab switches fields · Enter applies · Esc cancels\nCtrl+U clears field · Ctrl+R resets both filters\n\nSize uses the current allocated/apparent measurement.\nDirectory age uses its newest subtree modification.\nMatching folders include their contents; ancestors remain as\ncontext and cannot be marked, deleted, moved or renamed.\nUnknown ages are excluded when an age limit is set.\nNo files are changed. PgUp/PgDn scroll this help.",
+                    error = input
+                        .error
+                        .as_ref()
+                        .map(|e| format!("Error: {e}"))
+                        .unwrap_or_default(),
+                    size = field(0, &input.size),
+                    days = field(1, &input.days)
+                ),
+                false,
+            )
+        }
         Modal::WorktreeRemove {
             paths,
             force,
@@ -1139,7 +1217,7 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F3                Show / hide operation progress\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git reports, sync, cleanup and worktrees\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  F2                Age/size filters in tree and map\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F3                Show / hide operation progress\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git reports, sync, cleanup and worktrees\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),

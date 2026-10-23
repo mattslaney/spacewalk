@@ -6,6 +6,7 @@ use crate::{
     files::{
         self, Directory, FileEvent, FileItem, FileRequest, FileTask, TransferMode, TransferQueue,
     },
+    filters::ViewFilters,
     git::{GitTask, RepoState},
     git_actions::{
         GitAction, GitActionTask, GitCommand, GitEvent, GitJob, GitOptions, GitPreview, Repository,
@@ -29,7 +30,7 @@ use std::{
     process::ExitStatus,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 const NOTICE_DURATION: Duration = Duration::from_secs(3);
@@ -39,6 +40,7 @@ pub enum Modal {
     Delete(DeleteBatch),
     Errors,
     FileInput(FileInput),
+    ViewFilters(FilterInput),
     Result {
         title: String,
         text: String,
@@ -66,6 +68,32 @@ pub struct GitPanel {
     pub report: Option<(GitCommand, String)>,
     pub entries: Vec<GitEntry>,
     pub selected: usize,
+}
+
+pub struct FilterInput {
+    pub size: String,
+    pub days: String,
+    pub field: usize,
+    pub cursor: usize,
+    pub error: Option<String>,
+}
+impl FilterInput {
+    fn new(filters: ViewFilters) -> Self {
+        let size = filters
+            .min_size
+            .map_or(String::new(), |value| value.to_string());
+        let days = filters
+            .min_age_days
+            .map_or(String::new(), |value| value.to_string());
+        let cursor = size.len();
+        Self {
+            size,
+            days,
+            field: 0,
+            cursor,
+            error: None,
+        }
+    }
 }
 
 pub enum FileInputKind {
@@ -140,6 +168,7 @@ struct Restore {
     marked: Vec<(PathBuf, Identity, Kind)>,
     sort: Sort,
     query: String,
+    view_filters: ViewFilters,
     focus: Panel,
 }
 
@@ -163,6 +192,7 @@ impl Restore {
                 .collect(),
             sort: b.sort,
             query: b.query.clone(),
+            view_filters: b.view_filters,
             focus: b.focus,
         }
     }
@@ -213,6 +243,9 @@ impl Restore {
                 break b.scope;
             }
         };
+        if self.view_filters.active() {
+            b.set_view_filters(self.view_filters);
+        }
         b.filter(self.query);
         if b.rows.iter().any(|r| r.id == selected_id) {
             b.selected = selected_id;
@@ -792,6 +825,10 @@ impl App {
             }
             return;
         }
+        if matches!(self.modal, Some(Modal::ViewFilters(_))) {
+            self.view_filter_key(key);
+            return;
+        }
         if matches!(self.modal, Some(Modal::FileInput(_))) {
             self.file_input_key(key);
             return;
@@ -954,6 +991,13 @@ impl App {
             }
             return;
         }
+        if key.code == KeyCode::F(2) && key.kind == KeyEventKind::Press {
+            if let Some(browser) = &self.browser {
+                self.modal = Some(Modal::ViewFilters(FilterInput::new(browser.view_filters)));
+                self.modal_scroll = 0;
+            }
+            return;
+        }
         if key.kind == KeyEventKind::Press
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && key.code == KeyCode::Char('g')
@@ -1003,7 +1047,13 @@ impl App {
                 }
             }
             KeyCode::Char('/') => self.searching = true,
-            KeyCode::Esc => b.filter(String::new()),
+            KeyCode::Esc => {
+                if b.query.is_empty() && b.view_filters.active() {
+                    b.set_view_filters(ViewFilters::default());
+                } else {
+                    b.filter(String::new());
+                }
+            }
             KeyCode::Char('s') => b.cycle_sort(),
             KeyCode::Char('t') if key.kind == KeyEventKind::Press && !b.rows.is_empty() => {
                 if self.scanning.is_some()
@@ -1047,6 +1097,8 @@ impl App {
                     self.notify("Wait for the current operation before marking items.");
                 } else if b.selected == 0 {
                     self.notify("The scan root cannot be marked.");
+                } else if !b.fully_in_view(b.selected) && !b.marked.contains(&b.selected) {
+                    self.notify("Filter context only: select matching items, or clear age/size filters before marking this folder.");
                 } else {
                     b.toggle_mark(b.selected);
                 }
@@ -1093,6 +1145,10 @@ impl App {
                     } else {
                         b.marked.iter().copied().collect()
                     };
+                    if ids.iter().any(|&id| !b.fully_in_view(id)) {
+                        self.notify("Some targets are outside or partly excluded by age/size filters. Clear filters or unmark those targets before deleting.");
+                        return;
+                    }
                     match DeleteBatch::new(&b.data, ids) {
                         Ok(request) => {
                             self.modal = Some(Modal::Delete(request));
@@ -1823,6 +1879,11 @@ impl App {
                     } else {
                         b.marked.iter().copied().collect()
                     };
+                    if ids.iter().any(|&id| !b.fully_in_view(id)) {
+                        return Err(io::Error::other(
+                            "Some sources are outside or partly excluded by age/size filters. Clear filters or unmark those sources.",
+                        ));
+                    }
                     let mode = if code == KeyCode::Char('c') {
                         TransferMode::Copy
                     } else {
@@ -1857,6 +1918,12 @@ impl App {
                     String::new(),
                 ))),
                 KeyCode::Char('R') => {
+                    if !b.fully_in_view(b.selected) {
+                        return Err(io::Error::other(
+                            "Filter context only: clear age/size filters before renaming this folder.",
+                        ));
+                    }
+
                     if b.selected == 0 {
                         return Err(io::Error::other("The scan root cannot be renamed"));
                     }
@@ -1885,6 +1952,96 @@ impl App {
             }
             Ok(None) => self.notify("Files: items queued · navigate then p paste · Esc clear"),
             Err(error) => self.notify(format!("Files: {error}")),
+        }
+    }
+
+    fn view_filter_key(&mut self, key: KeyEvent) {
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        if key.code == KeyCode::Esc {
+            self.modal = None;
+            return;
+        }
+        if key.kind == KeyEventKind::Press
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('r')
+        {
+            if let Some(browser) = self.browser.as_mut() {
+                browser.set_view_filters(ViewFilters::default());
+            }
+            self.modal = None;
+            return;
+        }
+        let Some(Modal::ViewFilters(input)) = self.modal.as_mut() else {
+            return;
+        };
+        if key.code == KeyCode::Enter && key.kind == KeyEventKind::Press {
+            match ViewFilters::parse(&input.size, &input.days, SystemTime::now()) {
+                Ok(filters) => {
+                    if let Some(browser) = self.browser.as_mut() {
+                        browser.set_view_filters(filters);
+                    }
+                    self.modal = None;
+                    self.last_click = None;
+                }
+                Err(error) => {
+                    input.error = Some(error);
+                    self.modal_scroll = 0;
+                }
+            }
+            return;
+        }
+        if key.code == KeyCode::PageDown {
+            self.modal_scroll = self.modal_scroll.saturating_add(10);
+            return;
+        }
+        if key.code == KeyCode::PageUp {
+            self.modal_scroll = self.modal_scroll.saturating_sub(10);
+            return;
+        }
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            input.field = 1 - input.field;
+            input.cursor = if input.field == 0 {
+                input.size.len()
+            } else {
+                input.days.len()
+            };
+            return;
+        }
+        let text = if input.field == 0 {
+            &mut input.size
+        } else {
+            &mut input.days
+        };
+        input.cursor = input.cursor.min(text.len());
+        match key.code {
+            KeyCode::Home => input.cursor = 0,
+            KeyCode::End => input.cursor = text.len(),
+            KeyCode::Left => input.cursor = input.cursor.saturating_sub(1),
+            KeyCode::Right => input.cursor = (input.cursor + 1).min(text.len()),
+            KeyCode::Backspace if input.cursor > 0 => {
+                input.cursor -= 1;
+                text.remove(input.cursor);
+            }
+            KeyCode::Delete if input.cursor < text.len() => {
+                text.remove(input.cursor);
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                text.clear();
+                input.cursor = 0;
+            }
+            KeyCode::Char(c)
+                if c.is_ascii()
+                    && !c.is_control()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                text.insert(input.cursor, c);
+                input.cursor += 1;
+            }
+            _ => {}
         }
     }
 

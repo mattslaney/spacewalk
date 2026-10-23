@@ -90,6 +90,7 @@ spacewalk --help
 | Esc | Clear the filter, cancel deletion, or close a dialog |
 | n / N | Next / previous matching name in the current scope |
 | s | Cycle sort: largest, name, file count, smallest |
+| F2 | Set minimum size and minimum modification age for both panels |
 | y | Copy the selected item's full path to the system clipboard |
 | c / x / p | Queue items for copy / cut / paste |
 | a / R | Create a folder / rename the selected item |
@@ -156,6 +157,39 @@ The selected repository's Git detail line starts with its upstream remote URL. I
 A selected directory lights up all its file blocks and gets a white outline around its region. Colors are assigned by extension. Small files may have no visible block at terminal resolution; zoom into their parent directory to see more detail. Zero-byte files and empty directories are accessible in the tree.
 
 Filtering keeps matching names and their ancestors in the tree. The map keeps the full size context. Picking a block outside the filter clears the filter so the selected item can appear in the tree. Search is scoped to the directory you are viewing.
+
+Press `F2` for **age and size filters**. Set a minimum size (for example `500MiB`
+or `2GiB`) and/or “not modified for at least” a whole number of days. Both
+criteria must match. Blank or zero disables a criterion; Enter applies, Esc
+cancels edits, and Ctrl+R in the dialog clears both criteria. Outside the dialog,
+Esc clears the name search first, then age/size filters. A queued file transfer
+still takes precedence for Esc, as shown in the footer.
+
+These filters hide excluded items from **both the tree and space map**. Matching
+folders include their contents, including smaller files within a large matching
+folder. Ancestors remain expanded as `[context]` so matching descendants can be
+reached; the scan root itself never causes its whole contents to match. A folder’s
+age is its newest modification anywhere in the scanned subtree, including the
+folder itself. Unknown/incomplete modification ages do not satisfy an age filter.
+Modification age describes filesystem metadata, rather than when something was
+last used.
+
+The tree’s filtered sizes/file counts and the map reflect matching contents.
+The header keeps full scan totals and shows a separate active-filter banner;
+selected-item details retain actual full sizes. Filters survive rescans and are
+applied to the scan data without an additional scan when edited. Sizes use the
+current allocated/apparent-size mode. `GB` means decimal bytes; `GiB` means binary.
+
+Context folders cannot be marked, copied, moved, renamed or deleted while they
+contain filtered-out context. Previously marked targets remain marked, but file
+actions require clearing the filters or unmarking any excluded/context targets.
+This avoids silently including hidden contents in a folder operation. Matching
+folders remain whole filesystem targets. Git cleanup previews continue to describe
+the whole selected checkout, independently of these view filters.
+
+Name search still filters tree names while keeping the map’s current age/size
+context. Manual `h`/`H` visibility choices remain separate and affect only the map;
+clearing age/size filters preserves those choices.
 
 To set aside a known large item such as `target/`, select it and press `h`. The treemap excludes its entire subtree and expands the remaining blocks to fill the panel. Hidden entries stay in the tree, dimmed and marked `[hidden]`; their actual sizes and the scan totals are unchanged. Percentages and usage bars show each item's share of the remaining map, and the map title reports the visible size and hidden-item count.
 

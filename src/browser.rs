@@ -1,10 +1,14 @@
 use crate::{
+    filters::ViewFilters,
     git::{self, RepoState},
     scan::{Kind, NodeId, Snapshot},
     treemap::{Direction, Treemap},
 };
 use ratatui::layout::Rect;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::SystemTime,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Panel {
@@ -61,6 +65,11 @@ pub struct Browser {
     pub map: Treemap,
     pub repositories: HashMap<NodeId, RepoState>,
     pub marked: HashSet<NodeId>,
+    pub view_filters: ViewFilters,
+    view_passed: Vec<bool>,
+    view_included: Vec<bool>,
+    filtered_sizes: Vec<u64>,
+    filtered_files: Vec<u64>,
     map_area: Rect,
     // Node IDs map to visible row offsets; usize::MAX marks a hidden row.
     row_positions: Vec<usize>,
@@ -89,6 +98,11 @@ impl Browser {
             map: Treemap::default(),
             repositories,
             marked: HashSet::new(),
+            view_filters: ViewFilters::default(),
+            view_passed: Vec::new(),
+            view_included: Vec::new(),
+            filtered_sizes: Vec::new(),
+            filtered_files: Vec::new(),
             map_area: Rect::default(),
             row_positions,
             included,
@@ -100,6 +114,80 @@ impl Browser {
         browser.sort_nodes();
         browser.rebuild_rows();
         browser
+    }
+
+    pub fn set_view_filters(&mut self, filters: ViewFilters) {
+        self.set_view_filters_at(filters, SystemTime::now());
+    }
+
+    pub fn set_view_filters_at(&mut self, filters: ViewFilters, now: SystemTime) {
+        self.view_filters = filters;
+        self.view_passed.clear();
+        self.view_included.clear();
+        self.filtered_sizes.clear();
+        self.filtered_files.clear();
+        if filters.active() {
+            let cutoff = filters.cutoff(now);
+            for (id, node) in self.data.nodes.iter().enumerate() {
+                let inherited = node.parent.is_some_and(|p| self.view_passed[p]);
+                let passes = id != 0
+                    && filters.min_size.is_none_or(|min| node.size >= min)
+                    && (filters.min_age_days.is_none()
+                        || node
+                            .modified
+                            .zip(cutoff)
+                            .is_some_and(|(modified, cutoff)| modified <= cutoff));
+                let passed = inherited || passes;
+                self.view_passed.push(passed);
+                self.view_included.push(passed);
+                self.filtered_sizes
+                    .push(if passed && node.kind != Kind::Directory {
+                        node.size
+                    } else {
+                        0
+                    });
+                self.filtered_files
+                    .push(u64::from(passed && node.kind != Kind::Directory));
+            }
+            for id in (1..self.data.nodes.len()).rev() {
+                let parent = self.data.nodes[id].parent.unwrap();
+                self.view_included[parent] |= self.view_included[id];
+                self.filtered_sizes[parent] =
+                    self.filtered_sizes[parent].saturating_add(self.filtered_sizes[id]);
+                self.filtered_files[parent] =
+                    self.filtered_files[parent].saturating_add(self.filtered_files[id]);
+            }
+        }
+        self.update_map_sizes();
+        self.sort_nodes();
+        self.filter(self.query.clone());
+        self.scroll = 0;
+    }
+    pub fn in_view(&self, id: NodeId) -> bool {
+        !self.view_filters.active() || self.view_included[id]
+    }
+    pub fn fully_in_view(&self, id: NodeId) -> bool {
+        !self.view_filters.active() || self.view_passed[id]
+    }
+    pub fn is_context(&self, id: NodeId) -> bool {
+        self.in_view(id) && !self.fully_in_view(id)
+    }
+    pub fn filtered_size(&self, id: NodeId) -> u64 {
+        if self.view_filters.active() {
+            self.filtered_sizes[id]
+        } else {
+            self.data.nodes[id].size
+        }
+    }
+    pub fn filtered_file_count(&self, id: NodeId) -> u64 {
+        if self.view_filters.active() {
+            self.filtered_files[id]
+        } else {
+            self.data.nodes[id].files
+        }
+    }
+    pub fn open_in_view(&self, id: NodeId) -> bool {
+        self.expanded.contains(&id) || !self.query.is_empty() || self.is_context(id)
     }
 
     pub fn cycle_sort(&mut self) {
@@ -172,12 +260,13 @@ impl Browser {
                     .parent
                     .is_some_and(|parent| self.hidden_effective[parent]);
             self.hidden_effective.push(hidden);
-            self.map_sizes
-                .push(if hidden || node.kind == Kind::Directory {
+            self.map_sizes.push(
+                if hidden || node.kind == Kind::Directory || !self.fully_in_view(id) {
                     0
                 } else {
                     node.size
-                });
+                },
+            );
         }
         // Children follow parents in the arena, so accumulate visible bytes in
         // reverse order without changing the scan's actual disk usage totals.
@@ -192,12 +281,14 @@ impl Browser {
         for id in 0..self.data.nodes.len() {
             let mut children = std::mem::take(&mut self.data.nodes[id].children);
             children.sort_by(|&a, &b| {
+                let (a_size, b_size) = (self.filtered_size(a), self.filtered_size(b));
+                let (a_files, b_files) = (self.filtered_file_count(a), self.filtered_file_count(b));
                 let (a, b) = (&self.data.nodes[a], &self.data.nodes[b]);
                 let primary = match self.sort {
-                    Sort::Largest => b.size.cmp(&a.size),
-                    Sort::Smallest => a.size.cmp(&b.size),
+                    Sort::Largest => b_size.cmp(&a_size),
+                    Sort::Smallest => a_size.cmp(&b_size),
                     Sort::Name => a.name.cmp(&b.name),
-                    Sort::Files => b.files.cmp(&a.files),
+                    Sort::Files => b_files.cmp(&a_files),
                 };
                 primary.then_with(|| a.name.cmp(&b.name))
             });
@@ -212,12 +303,12 @@ impl Browser {
         self.rows.clear();
         let mut pending = vec![(self.scope, 0)];
         while let Some((id, depth)) = pending.pop() {
-            if !self.query.is_empty() && !self.included[id] {
+            if !self.in_view(id) || (!self.query.is_empty() && !self.included[id]) {
                 continue;
             }
             self.row_positions[id] = self.rows.len();
             self.rows.push(TreeRow { id, depth });
-            if !self.query.is_empty() || self.expanded.contains(&id) {
+            if self.open_in_view(id) {
                 pending.extend(
                     self.data.nodes[id]
                         .children
@@ -251,7 +342,8 @@ impl Browser {
         if !self.query.is_empty() {
             let needle = self.query.to_lowercase();
             for (id, node) in self.data.nodes.iter().enumerate() {
-                if node.name.to_string_lossy().to_lowercase().contains(&needle) {
+                if self.in_view(id) && node.name.to_string_lossy().to_lowercase().contains(&needle)
+                {
                     self.included[id] = true;
                     self.matches.push(id);
                 }
@@ -297,6 +389,9 @@ impl Browser {
     /// One selection is shared by both panels. Reveal map-picked files by
     /// expanding every ancestor; clear a filter if it would hide the selection.
     pub fn select(&mut self, id: NodeId) {
+        if !self.in_view(id) {
+            return;
+        }
         if !self.query.is_empty() && !self.included[id] {
             self.filter(String::new());
         }

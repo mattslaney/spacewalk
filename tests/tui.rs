@@ -2150,3 +2150,135 @@ fn branch_checkout_is_quick_refreshes_context_and_blocks_a_dirty_current_checkou
         "main"
     );
 }
+
+#[test]
+fn size_age_filter_dialog_applies_to_both_views_validates_and_resets_without_scanning() {
+    let (_dir, mut app) = fixture();
+    key(&mut app, KeyCode::F(2));
+    assert!(matches!(app.modal, Some(Modal::ViewFilters(_))));
+    for c in "5000".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(app.modal.is_none());
+    assert!(app.scanning.is_none());
+    let screen = render(&mut app, 120, 42);
+    assert!(screen.contains("FILTERS:"));
+    assert!(screen.contains("FILTERED"));
+    let b = app.browser.as_ref().unwrap();
+    assert_eq!(b.data.nodes[0].size, 10000);
+    assert_eq!(b.filtered_size(0), 6000);
+    assert_eq!(b.map.leaves.len(), 1);
+    assert!(b.data.nodes[b.map.leaves[0].id].name == "large.jpg");
+    assert!(
+        !b.rows
+            .iter()
+            .any(|row| b.data.nodes[row.id].name == "notes.txt")
+    );
+    key(&mut app, KeyCode::F(2));
+    key(&mut app, KeyCode::Tab);
+    for c in "90".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        render(&mut app, width, height);
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(app.browser.as_ref().unwrap().rows.is_empty());
+    assert!(render(&mut app, 120, 42).contains("No space matches"));
+    key(&mut app, KeyCode::Esc);
+    assert!(!app.browser.as_ref().unwrap().view_filters.active());
+    key(&mut app, KeyCode::F(2));
+    for c in "invalid".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(&app.modal, Some(Modal::ViewFilters(input)) if input.error.is_some()));
+    assert!(!app.browser.as_ref().unwrap().view_filters.active());
+    app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    for c in "2KiB".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        app.browser.as_ref().unwrap().view_filters.min_size,
+        Some(2048)
+    );
+    key(&mut app, KeyCode::F(2));
+    app.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    assert!(app.modal.is_none());
+    assert!(!app.browser.as_ref().unwrap().view_filters.active());
+    assert!(app.scanning.is_none());
+}
+
+#[test]
+fn filters_survive_rescans_and_protect_context_folders_and_hidden_marks() {
+    use spacewalk::filters::ViewFilters;
+    use std::{
+        fs::{File, FileTimes},
+        time::SystemTime,
+    };
+    let (dir, mut app) = fixture();
+    let folder = dir.path().join("mixed");
+    fs::create_dir(&folder).unwrap();
+    let old_file = folder.join("old.bin");
+    let recent_file = folder.join("recent.bin");
+    fs::write(&old_file, [0; 1000]).unwrap();
+    fs::write(&recent_file, [0; 1100]).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(200 * 86400);
+    File::open(&old_file)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(old))
+        .unwrap();
+    app.rescan();
+    wait(&mut app);
+    let b = app.browser.as_mut().unwrap();
+    let folder_id = b.data.find_path(&folder).unwrap();
+    b.set_view_filters(ViewFilters {
+        min_size: Some(500),
+        min_age_days: Some(90),
+    });
+    b.select(folder_id);
+    assert!(b.is_context(folder_id));
+    for action in ['m', 'd', 'c', 'x', 'R'] {
+        key(&mut app, KeyCode::Char(action));
+        assert!(app.modal.is_none());
+        assert!(app.transfer.is_none());
+        assert!(app.deleting.is_none());
+        assert!(app.browser.as_ref().unwrap().marked.is_empty());
+    }
+    let b = app.browser.as_mut().unwrap();
+    b.select(b.data.find_path(&old_file).unwrap());
+    key(&mut app, KeyCode::Char('m'));
+    fs::write(dir.path().join("aaa-new"), [0; 2000]).unwrap();
+    app.rescan();
+    wait(&mut app);
+    let b = app.browser.as_ref().unwrap();
+    assert!(b.view_filters.active());
+    assert!(b.marked.contains(&b.data.find_path(&old_file).unwrap()));
+    key(&mut app, KeyCode::Char('d'));
+    assert!(
+        matches!(&app.modal, Some(Modal::Delete(request)) if request.items.len() == 1 && request.items[0].path == old_file)
+    );
+    key(&mut app, KeyCode::Char('y'));
+    wait(&mut app);
+    assert!(!old_file.exists());
+    assert!(recent_file.exists());
+    assert!(folder.exists());
+    assert!(app.browser.as_ref().unwrap().view_filters.active());
+    key(&mut app, KeyCode::Esc);
+    let b = app.browser.as_mut().unwrap();
+    let recent_id = b.data.find_path(&recent_file).unwrap();
+    b.select(recent_id);
+    b.toggle_mark(recent_id);
+    b.set_view_filters(ViewFilters {
+        min_size: Some(999999),
+        min_age_days: None,
+    });
+    key(&mut app, KeyCode::Char('d'));
+    assert!(app.modal.is_none());
+    assert!(recent_file.exists());
+    assert!(app.status.contains("outside or partly excluded"));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.browser.as_ref().unwrap().marked.contains(&recent_id));
+}
