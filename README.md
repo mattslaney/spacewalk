@@ -93,7 +93,8 @@ spacewalk --help
 | y | Copy the selected item's full path to the system clipboard |
 | c / x / p | Queue items for copy / cut / paste |
 | a / R | Create a folder / rename the selected item |
-| F4 | Cancel a running file operation at a safe boundary |
+| F4 | Request cancellation of a running file or Git operation |
+| Ctrl+g | Open Git sync and cleanup actions |
 | t | Open a shell in the selected directory, or the parent of a selected file |
 | r | Rescan the original directory and preserve the current view where possible |
 | h | Hide / show the selected file or directory in the treemap |
@@ -146,7 +147,7 @@ Repository roots have a `⎇` icon in the tree, including linked worktrees, subm
 | `◇` | Detached HEAD; sync is unverified |
 | `≡` | Stashed changes exist |
 
-Green means synced, purple identifies repositories without remotes, amber marks other local or uncertain state, and gray means checking. Select the repository for a text explanation below the panels; `?` opens the icon legend. Checks run once in the background after each scan, use all local branches, and leave navigation responsive. Remote comparisons use **last-fetched local refs**; Spacewalk does not fetch or contact remotes. Fetch with Git separately, then press `r` to rescan and recheck. A clean checked-out branch alone is not enough for `✓`: other local branches, missing upstreams, detached HEAD, and stashes also prevent it.
+Green means synced, purple identifies repositories without remotes, amber marks other local or uncertain state, and gray means checking. Select the repository for a text explanation below the panels; `?` opens the icon legend. Checks run once in the background after each scan, use all local branches, and leave navigation responsive. Remote comparisons use **last-fetched local refs**; automatic status checks do not fetch or contact remotes. Use the Git action panel or fetch in the shell, then press `r` to rescan and recheck. A clean checked-out branch alone is not enough for `✓`: other local branches, missing upstreams, detached HEAD, and stashes also prevent it.
 
 The selected repository's Git detail line starts with its upstream remote URL. It uses the checked-out branch's configured remote; if that is unavailable, it shows `origin` or the first configured remote, labeled as a fallback remote. URLs are looked up in the background, and long lines end with an ellipsis. Embedded HTTP credentials are omitted from display.
 
@@ -157,6 +158,57 @@ Filtering keeps matching names and their ancestors in the tree. The map keeps th
 To set aside a known large item such as `target/`, select it and press `h`. The treemap excludes its entire subtree and expands the remaining blocks to fill the panel. Hidden entries stay in the tree, dimmed and marked `[hidden]`; their actual sizes and the scan totals are unchanged. Percentages and usage bars show each item's share of the remaining map, and the map title reports the visible size and hidden-item count.
 
 Press `h` on a hidden item to show it again, or `H` to restore everything. Showing a child also reveals any hidden ancestors, while independently hidden siblings stay hidden. Visibility choices survive rescans during the current session, including new files added within a hidden directory. Hiding items never changes files on disk.
+
+## Git sync and cleanup
+
+Press `Ctrl+g` on a repository or an item inside it to open the floating action
+panel. This also works when scanning a directory inside a larger repository.
+The panel shows the repository, current branch, and configured upstream.
+
+| Panel key | Action |
+| --- | --- |
+| p / P | Preview Pull / Push |
+| c | Preview Clean checkout |
+| r | Preview Reset to remote |
+| f | Toggle force-with-lease for Push (default: off) |
+| l | Toggle discarding current-branch local commits during Clean (default: off) |
+| b | Toggle deleting other local branches during Reset (default: off) |
+| s | Toggle clearing repository-wide stashes during Reset (default: off) |
+
+Every action opens a scrollable preview. Press `y` to execute; Enter, `n`, or Esc
+cancels. Preparation may fetch remote references, but checkout changes, deletion,
+and pushes require confirmation. If the repository changes after the preview,
+Spacewalk asks for a fresh preview.
+
+**Pull** fetches the configured upstream and fast-forwards to its previewed commit.
+Divergent histories require the shell. **Push** sends only the current branch to
+its configured upstream. Force is optional and uses an explicit lease on the
+remote commit shown in the preview; a concurrent remote update rejects the push.
+Remote actions require an attached branch with an upstream.
+
+**Clean checkout** restores tracked files and the index to `HEAD`, then removes
+untracked and ignored files, including build output. It keeps local commits,
+branches, and stashes unless the option to discard current-branch local commits
+is enabled; that option restores the fetched upstream commit instead.
+
+**Reset to remote** restores the current branch to its fetched upstream commit and
+removes untracked and ignored files. Other local branches and stashes are kept by
+default. The optional branch cleanup includes unpushed branches, lists their
+commits in the preview, and keeps branches checked out in another worktree.
+Stash cleanup affects the whole repository, including its linked worktrees.
+
+Cleanup resets in place: Git configuration, tags, reflogs, and retained objects
+remain. Removing local commits does not guarantee an immediate reduction in
+`.git` storage. Nested repositories, submodules, and other worktrees are not
+recursively reset or cleaned. Bare repositories and interrupted Git operations
+are left for the shell.
+
+Commands run in the background using existing credentials and SSH configuration,
+without interactive password prompts. Errors and results remain in a scrollable
+dialog. Use F4 to request cancellation; completed steps stay completed, and a
+cancelled push may need its remote outcome checked in the shell. File mutations,
+rescans, and shell launches wait while a Git job is active. For other Git work,
+close the panel and press `t` to open the shell.
 
 ## Space accounting and deletion
 

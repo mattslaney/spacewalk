@@ -7,6 +7,7 @@ use crate::{
         self, Directory, FileEvent, FileItem, FileRequest, FileTask, TransferMode, TransferQueue,
     },
     git::{GitTask, RepoState},
+    git_actions::{GitAction, GitActionTask, GitEvent, GitJob, GitOptions, GitPreview, Repository},
     scan::{Identity, Kind, Options, Progress, ScanEvent, ScanTask, Snapshot},
     shell::ShellRequest,
     treemap::Direction,
@@ -33,6 +34,14 @@ pub enum Modal {
     Errors,
     FileInput(FileInput),
     Result { title: String, text: String },
+    GitPanel(GitPanel),
+    GitPreview(Box<GitPreview>),
+}
+
+pub struct GitPanel {
+    pub repository: Repository,
+    pub options: GitOptions,
+    pub error: Option<String>,
 }
 
 pub enum FileInputKind {
@@ -210,6 +219,7 @@ pub struct App {
     pub shell: Option<ShellRequest>,
     pub transfer: Option<TransferQueue>,
     pub file_task: Option<FileTask>,
+    pub git_action: Option<GitActionTask>,
     pub operation_status: String,
     select_after_scan: Option<PathBuf>,
     status_expires: Option<Instant>,
@@ -239,6 +249,7 @@ impl App {
             shell: None,
             transfer: None,
             file_task: None,
+            git_action: None,
             operation_status: String::new(),
             select_after_scan: None,
             status_expires: None,
@@ -248,7 +259,7 @@ impl App {
     }
 
     pub fn rescan(&mut self) {
-        if self.deleting.is_some() || self.file_task.is_some() {
+        if self.deleting.is_some() || self.file_task.is_some() || self.git_action.is_some() {
             return;
         }
         if !self.status.starts_with("Deletion") {
@@ -298,6 +309,59 @@ impl App {
     /// Process worker updates and report whether the screen needs redrawing.
     pub fn poll_workers(&mut self) -> bool {
         let mut changed = false;
+        loop {
+            let event = match self
+                .git_action
+                .as_ref()
+                .map(|task| task.receiver.try_recv())
+            {
+                Some(Ok(event)) => event,
+                Some(Err(TryRecvError::Disconnected)) => GitEvent::Finished(Err(
+                    "Git worker stopped unexpectedly; review the repository in the shell".into(),
+                )),
+                _ => break,
+            };
+            changed = true;
+            match event {
+                GitEvent::Progress(text) => self.operation_status = text,
+                event => {
+                    self.git_action = None;
+                    self.operation_status.clear();
+                    self.modal_scroll = 0;
+                    match event {
+                        GitEvent::Inspected(Ok(repository)) => {
+                            self.modal = Some(Modal::GitPanel(GitPanel {
+                                repository,
+                                options: GitOptions::default(),
+                                error: None,
+                            }))
+                        }
+                        GitEvent::Previewed(Ok(preview)) => {
+                            self.modal = Some(Modal::GitPreview(preview))
+                        }
+                        GitEvent::Finished(result) => {
+                            self.modal = Some(Modal::Result {
+                                title: " GIT RESULT ".into(),
+                                text: result.unwrap_or_else(|error| error),
+                            });
+                            self.rescan();
+                        }
+                        GitEvent::Inspected(Err(error)) | GitEvent::Previewed(Err(error)) => {
+                            self.modal = Some(Modal::Result {
+                                title: " GIT ACTION UNAVAILABLE ".into(),
+                                text: error,
+                            });
+                            self.rescan();
+                        }
+                        GitEvent::Progress(_) => unreachable!(),
+                    }
+                    if self.exit_after_delete {
+                        self.quitting = true;
+                    }
+                    break;
+                }
+            }
+        }
         loop {
             let event = match self.file_task.as_ref().map(|task| task.receiver.try_recv()) {
                 Some(Ok(event)) => event,
@@ -464,7 +528,11 @@ impl App {
     }
 
     fn quit(&mut self) {
-        if let Some(task) = &self.file_task {
+        if let Some(task) = &self.git_action {
+            task.cancel();
+            self.exit_after_delete = true;
+            self.set_status("Waiting for Git to stop before exit…");
+        } else if let Some(task) = &self.file_task {
             task.cancel();
             self.exit_after_delete = true;
             self.set_status("Finishing file operation before exit…");
@@ -486,6 +554,36 @@ impl App {
         }
         if matches!(self.modal, Some(Modal::FileInput(_))) {
             self.file_input_key(key);
+            return;
+        }
+        if matches!(self.modal, Some(Modal::GitPanel(_))) {
+            self.git_panel_key(key);
+            return;
+        }
+        if matches!(self.modal, Some(Modal::GitPreview(_))) {
+            if key.kind != KeyEventKind::Press {
+                return;
+            }
+            match key.code {
+                KeyCode::Char('y') => {
+                    if let Some(Modal::GitPreview(preview)) = self.modal.take() {
+                        self.start_git_job(GitJob::Execute(preview));
+                    }
+                }
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n' | 'q') => {
+                    self.modal = None;
+                    self.rescan();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.modal_scroll = self.modal_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.modal_scroll = self.modal_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => self.modal_scroll = self.modal_scroll.saturating_add(10),
+                KeyCode::PageUp => self.modal_scroll = self.modal_scroll.saturating_sub(10),
+                _ => {}
+            }
             return;
         }
         if self.modal.is_some() {
@@ -575,6 +673,13 @@ impl App {
             return;
         }
         if key.kind == KeyEventKind::Press
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('g')
+        {
+            self.open_git_panel();
+            return;
+        }
+        if key.kind == KeyEventKind::Press
             && matches!(key.code, KeyCode::Char('c' | 'x' | 'p' | 'a' | 'R'))
             && !key
                 .modifiers
@@ -593,6 +698,13 @@ impl App {
         {
             task.cancel();
             self.operation_status = "Cancelling at a safe boundary…".into();
+            return;
+        }
+        if key.code == KeyCode::F(4)
+            && let Some(task) = &self.git_action
+        {
+            task.cancel();
+            self.operation_status = "Stopping Git; completed steps are kept…".into();
             return;
         }
         match key.code {
@@ -626,7 +738,11 @@ impl App {
             KeyCode::Esc => b.filter(String::new()),
             KeyCode::Char('s') => b.cycle_sort(),
             KeyCode::Char('t') if key.kind == KeyEventKind::Press && !b.rows.is_empty() => {
-                if self.scanning.is_some() || self.deleting.is_some() || self.file_task.is_some() {
+                if self.scanning.is_some()
+                    || self.deleting.is_some()
+                    || self.file_task.is_some()
+                    || self.git_action.is_some()
+                {
                     self.notify("Wait for the current operation before opening a terminal.");
                 } else if self.shell.is_none() {
                     self.shell = Some(ShellRequest::new(&b.data, b.selected));
@@ -655,7 +771,11 @@ impl App {
                 self.last_click = None;
             }
             KeyCode::Char('m') if key.kind == KeyEventKind::Press && !b.rows.is_empty() => {
-                if self.scanning.is_some() || self.deleting.is_some() || self.file_task.is_some() {
+                if self.scanning.is_some()
+                    || self.deleting.is_some()
+                    || self.file_task.is_some()
+                    || self.git_action.is_some()
+                {
                     self.notify("Wait for the current operation before marking items.");
                 } else if b.selected == 0 {
                     self.notify("The scan root cannot be marked.");
@@ -693,7 +813,11 @@ impl App {
             KeyCode::PageDown => b.move_tree(self.hits.page_size.max(1) as isize),
             KeyCode::PageUp => b.move_tree(-(self.hits.page_size.max(1) as isize)),
             KeyCode::Char('d') | KeyCode::Delete if key.kind == KeyEventKind::Press => {
-                if self.scanning.is_some() || self.deleting.is_some() || self.file_task.is_some() {
+                if self.scanning.is_some()
+                    || self.deleting.is_some()
+                    || self.file_task.is_some()
+                    || self.git_action.is_some()
+                {
                     self.notify("Wait for the current operation before deleting.");
                 } else if !b.marked.is_empty() || !b.rows.is_empty() {
                     let ids = if b.marked.is_empty() {
@@ -743,8 +867,108 @@ impl App {
         }
     }
 
+    fn start_git_job(&mut self, job: GitJob) {
+        self.git = None;
+        self.modal = None;
+        self.operation_status = "Preparing Git action…".into();
+        self.git_action = Some(GitActionTask::start(job));
+    }
+
+    fn open_git_panel(&mut self) {
+        if self.scanning.is_some()
+            || self.deleting.is_some()
+            || self.file_task.is_some()
+            || self.git_action.is_some()
+        {
+            self.notify("Wait for the current operation before opening Git actions.");
+            return;
+        }
+        let Some(b) = &self.browser else {
+            return;
+        };
+        if b.rows.is_empty() {
+            return;
+        }
+        let path = b.data.path(b.selected);
+        let directory = if b.data.nodes[b.selected].kind == Kind::Directory {
+            path
+        } else {
+            path.parent().unwrap_or(&b.data.root).to_path_buf()
+        };
+        self.start_git_job(GitJob::Inspect(directory));
+    }
+
+    fn git_panel_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            self.modal = None;
+            self.rescan();
+            return;
+        }
+        let Some(Modal::GitPanel(panel)) = self.modal.as_mut() else {
+            return;
+        };
+        if key.code == KeyCode::PageDown {
+            self.modal_scroll = self.modal_scroll.saturating_add(5);
+            return;
+        }
+        if key.code == KeyCode::PageUp {
+            self.modal_scroll = self.modal_scroll.saturating_sub(5);
+            return;
+        }
+        let action = match key.code {
+            KeyCode::Char('f') => {
+                panel.options.force = !panel.options.force;
+                None
+            }
+            KeyCode::Char('l') => {
+                panel.options.discard_commits = !panel.options.discard_commits;
+                None
+            }
+            KeyCode::Char('b') => {
+                panel.options.delete_branches = !panel.options.delete_branches;
+                None
+            }
+            KeyCode::Char('s') => {
+                panel.options.clear_stashes = !panel.options.clear_stashes;
+                None
+            }
+            KeyCode::Char('p') => Some(GitAction::Pull),
+            KeyCode::Char('P') => Some(GitAction::Push),
+            KeyCode::Char('c') => Some(GitAction::Clean),
+            KeyCode::Char('r') => Some(GitAction::Reset),
+            _ => None,
+        };
+        if let Some(action) = action {
+            let needs_remote = action != GitAction::Clean || panel.options.discard_commits;
+            if panel.repository.head.is_none() {
+                panel.error = Some("No commits yet; use the shell first.".into());
+                return;
+            }
+            if needs_remote
+                && (panel.repository.branch.is_none() || panel.repository.upstream.is_none())
+            {
+                panel.error = Some("This action needs an attached branch with a configured remote upstream. Use the shell to configure it.".into());
+                return;
+            }
+            let options = panel.options;
+            let path = panel.repository.root.clone();
+            self.start_git_job(GitJob::Preview {
+                path,
+                action,
+                options,
+            });
+        }
+    }
+
     fn file_action(&mut self, code: KeyCode) {
-        if self.scanning.is_some() || self.deleting.is_some() || self.file_task.is_some() {
+        if self.scanning.is_some()
+            || self.deleting.is_some()
+            || self.file_task.is_some()
+            || self.git_action.is_some()
+        {
             self.notify("Wait for the current operation before changing files.");
             return;
         }

@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod delete;
 pub mod files;
 pub mod git;
+pub mod git_actions;
 pub mod scan;
 pub mod shell;
 pub mod treemap;

@@ -20,7 +20,11 @@ fn key(app: &mut App, code: KeyCode) {
 
 fn wait(app: &mut App) {
     let deadline = Instant::now() + Duration::from_secs(3);
-    while app.scanning.is_some() || app.deleting.is_some() || app.file_task.is_some() {
+    while app.scanning.is_some()
+        || app.deleting.is_some()
+        || app.file_task.is_some()
+        || app.git_action.is_some()
+    {
         assert!(
             Instant::now() < deadline,
             "worker timed out: {}",
@@ -866,4 +870,131 @@ fn paste_dialog_completes_paths_and_unicode_editing_stays_on_character_boundarie
     for (width, height) in [(60, 20), (120, 42), (30, 10)] {
         let _ = render(&mut app, width, height);
     }
+}
+
+fn init_git_fixture(path: &std::path::Path) {
+    for args in [
+        vec!["init", "--initial-branch=main"],
+        vec!["config", "user.name", "Spacewalk Test"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["add", "."],
+        vec!["commit", "-m", "initial"],
+    ] {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn open_git(app: &mut App) {
+    app.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    wait(app);
+    assert!(matches!(app.modal, Some(Modal::GitPanel(_))));
+}
+
+#[test]
+fn git_panel_options_default_off_and_remote_actions_explain_missing_upstream() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if !panel.options.force && !panel.options.discard_commits && !panel.options.delete_branches && !panel.options.clear_stashes)
+    );
+    key(&mut app, KeyCode::Char('p'));
+    assert!(app.git_action.is_none());
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.error.as_ref().unwrap().contains("upstream"))
+    );
+    for option in ['f', 'l', 'b', 's'] {
+        key(&mut app, KeyCode::Char(option));
+    }
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.options.force && panel.options.discard_commits && panel.options.delete_branches && panel.options.clear_stashes)
+    );
+    key(&mut app, KeyCode::PageDown);
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        let _ = render(&mut app, width, height);
+    }
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    open_git(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if !panel.options.force && !panel.options.discard_commits && !panel.options.delete_branches && !panel.options.clear_stashes)
+    );
+}
+
+#[test]
+fn git_cleanup_requires_explicit_confirmation_and_refreshes_the_view() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    fs::write(dir.path().join("notes.txt"), b"changed").unwrap();
+    fs::write(dir.path().join("garbage"), b"delete").unwrap();
+    app.rescan();
+    wait(&mut app);
+    app.browser.as_mut().unwrap().select(0);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('c'));
+    wait(&mut app);
+    assert!(matches!(app.modal, Some(Modal::GitPreview(_))));
+    assert!(render(&mut app, 60, 20).contains("[y] Execute action"));
+    let mut repeat = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(app.git_action.is_none());
+    assert!(dir.path().join("garbage").exists());
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(app.modal.is_none());
+    assert!(dir.path().join("garbage").exists());
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('c'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Char('y'));
+    wait(&mut app);
+    assert!(app.copying.is_none());
+    assert!(!dir.path().join("garbage").exists());
+    assert_eq!(fs::read(dir.path().join("notes.txt")).unwrap().len(), 1000);
+    assert!(
+        matches!(&app.modal, Some(Modal::Result { text, .. }) if text.contains("Clean checkout complete"))
+    );
+    assert!(
+        app.browser
+            .as_ref()
+            .unwrap()
+            .data
+            .find_path(&dir.path().join("garbage"))
+            .is_none()
+    );
+}
+
+#[test]
+fn git_jobs_block_other_mutations_and_quit_cancels_safely() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    app.rescan();
+    wait(&mut app);
+    app.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    assert!(app.git_action.is_some());
+    key(&mut app, KeyCode::Char('a'));
+    assert!(app.modal.is_none());
+    assert!(app.status.starts_with("Wait for"));
+    key(&mut app, KeyCode::Char('d'));
+    assert!(app.deleting.is_none());
+    key(&mut app, KeyCode::Char('t'));
+    assert!(app.shell.is_none());
+    key(&mut app, KeyCode::Char('q'));
+    assert!(!app.quitting);
+    wait(&mut app);
+    assert!(app.quitting);
 }

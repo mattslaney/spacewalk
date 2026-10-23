@@ -135,7 +135,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .split(area);
-    let state = if app.file_task.is_some() {
+    let state = if app.file_task.is_some() || app.git_action.is_some() {
         "WORKING"
     } else if app.deleting.is_some() {
         "DELETING"
@@ -295,12 +295,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .style(Style::default().fg(WARN)),
             sections[6],
         );
-    } else if app.file_task.is_some() {
+    } else if app.file_task.is_some() || app.git_action.is_some() {
         frame.render_widget(
             Paragraph::new(format!(
                 " {} · F4 cancel",
                 truncate(
-                    &app.operation_status,
+                    &display_name(std::ffi::OsStr::new(&app.operation_status)),
                     area.width.saturating_sub(15) as usize
                 )
             ))
@@ -323,9 +323,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else if marked > 0 {
             format!(" × {marked} marked · c copy · x cut · d delete · M clear")
         } else if area.width >= 100 {
-            " ↑↓←→ move  Tab panel  y path  c copy x cut p paste  a mkdir R rename  t shell  m mark  d del  ? help q".into()
+            " y path  c copy x cut p paste  a mkdir R rename  Ctrl+g Git  t shell  m mark  d del  ? help q".into()
         } else {
-            " y path c copy x cut p paste a mkdir R rename t shell ? q".into()
+            " y path c copy x cut p paste a mkdir R rename ^g Git ? q".into()
         };
         frame.render_widget(
             Paragraph::new(keys).style(Style::default().fg(MUTED)),
@@ -665,6 +665,37 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         return;
     };
     let (title, text, warning) = match modal {
+        Modal::GitPanel(panel) => {
+            let repo = &panel.repository;
+            let enabled = |value| if value { "x" } else { " " };
+            (
+                " GIT ACTIONS ",
+                format!(
+                    "p Pull · P Push · c Clean checkout · r Reset to remote\n\nRepository: {}\nBranch: {}\nUpstream: {}\n\nOPTIONS (off by default)\nf [{}] Force Push with lease\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\n\n{}\nEach action opens a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\nPgUp/PgDn scroll · Esc closes",
+                    display_name(repo.root.as_os_str()),
+                    repo.branch.as_deref().unwrap_or("detached"),
+                    repo.upstream.as_ref().map_or_else(
+                        || "not configured (remote actions disabled)".into(),
+                        |u| format!("{} / {}", u.remote, u.remote_ref)
+                    ),
+                    enabled(panel.options.force),
+                    enabled(panel.options.discard_commits),
+                    enabled(panel.options.delete_branches),
+                    enabled(panel.options.clear_stashes),
+                    panel.error.as_deref().unwrap_or("")
+                ),
+                false,
+            )
+        }
+        Modal::GitPreview(preview) => (
+            " CONFIRM GIT ACTION ",
+            format!(
+                "{}\n\n{}\n\n↑/↓ or PgUp/PgDn scroll",
+                preview.action.label(),
+                preview.text
+            ),
+            true,
+        ),
         Modal::Result { title, text } => (
             title.as_str(),
             format!("{text}\n\n↑/↓ scroll · Esc closes"),
@@ -719,7 +750,7 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F4                Cancel running file operation\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nNo network fetch; r rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git sync and cleanup panel\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),
@@ -832,9 +863,13 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         inside,
     );
     if warning {
+        let confirmation = if matches!(modal, Modal::GitPreview(_)) {
+            "[y] Execute action   [n / Esc / Enter] Cancel"
+        } else {
+            "[y] Delete permanently   [n / Esc / Enter] Cancel"
+        };
         frame.render_widget(
-            Paragraph::new("[y] Delete permanently   [n / Esc / Enter] Cancel")
-                .style(Style::default().fg(WARN).bold()),
+            Paragraph::new(confirmation).style(Style::default().fg(WARN).bold()),
             Rect::new(inside.x, rect.bottom() - 2, inside.width, 1),
         );
     }

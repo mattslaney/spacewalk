@@ -15,4 +15,4 @@ unicode-width = "0.2"
 tempfile = "3"
 
 [target.'cfg(any(target_os = "linux", target_vendor = "apple"))'.dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }

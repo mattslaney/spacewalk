@@ -157,7 +157,7 @@ impl Directory {
         }
         Ok(Self { path, chain })
     }
-    fn validate(&self) -> io::Result<()> {
+    pub(crate) fn validate(&self) -> io::Result<()> {
         for stamp in &self.chain {
             stamp.validate(false)?;
         }
