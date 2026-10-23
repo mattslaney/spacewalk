@@ -192,6 +192,16 @@ pub fn scan(
     root: &Path,
     options: Options,
     cancel: &AtomicBool,
+    report: impl FnMut(Progress),
+) -> io::Result<Snapshot> {
+    scan_excluding(root, options, cancel, &[], report)
+}
+
+pub(crate) fn scan_excluding(
+    root: &Path,
+    options: Options,
+    cancel: &AtomicBool,
+    excluded: &[PathBuf],
     mut report: impl FnMut(Progress),
 ) -> io::Result<Snapshot> {
     let started = Instant::now();
@@ -257,6 +267,9 @@ pub fn scan(
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "scan cancelled"));
             }
             let child_path = path.join(&name);
+            if excluded.contains(&child_path) {
+                continue;
+            }
             let meta = match fs::symlink_metadata(&child_path) {
                 Ok(meta) => meta,
                 Err(error) => {

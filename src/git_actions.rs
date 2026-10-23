@@ -155,6 +155,7 @@ impl GitActionTask {
             let runner = Runner {
                 cancel: &worker_cancel,
                 events: Some(&sender),
+                read_only: false,
             };
             let event = match job {
                 GitJob::Inspect(path) => GitEvent::Inspected(inspect_with(&path, &runner)),
@@ -174,9 +175,10 @@ impl GitActionTask {
     }
 }
 
-struct Runner<'a> {
+pub(crate) struct Runner<'a> {
     cancel: &'a AtomicBool,
     events: Option<&'a Sender<GitEvent>>,
+    read_only: bool,
 }
 
 fn command(root: &Path) -> Command {
@@ -241,7 +243,14 @@ fn stop_child(child: &mut std::process::Child) {
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 impl Runner<'_> {
-    fn check(&self) -> Result<(), String> {
+    pub(crate) fn readonly(cancel: &AtomicBool) -> Runner<'_> {
+        Runner {
+            cancel,
+            events: None,
+            read_only: true,
+        }
+    }
+    pub(crate) fn check(&self) -> Result<(), String> {
         if self.cancel.load(Ordering::Relaxed) {
             Err("Git operation cancelled; no rollback is implied".into())
         } else {
@@ -253,14 +262,28 @@ impl Runner<'_> {
             let _ = events.send(GitEvent::Progress(message));
         }
     }
-    fn run(&self, root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    pub(crate) fn run(&self, root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+        self.run_os(root, &args.iter().map(OsString::from).collect::<Vec<_>>())
+    }
+    pub(crate) fn run_os(&self, root: &Path, args: &[OsString]) -> Result<Vec<u8>, String> {
         self.check()?;
-        self.progress(visible(format!("git {}", args.join(" ")).as_bytes()));
+        self.progress(visible(
+            format!(
+                "git {}",
+                args.iter()
+                    .map(|arg| display_name(arg))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+            .as_bytes(),
+        ));
         let mut cmd = command(root);
-        if matches!(args.first(), Some(&"status" | &"diff" | &"log")) {
-            cmd.env("GIT_OPTIONAL_LOCKS", "0");
+        if self.read_only || matches!(args.first().and_then(|arg| arg.to_str()), Some("status" | "diff" | "log")) {
+            cmd.env("GIT_OPTIONAL_LOCKS", "0")
+                .env("GIT_NO_LAZY_FETCH", "1");
         }
-        if matches!(args.first(), Some(&"fetch" | &"push" | &"ls-remote")) {
+        let verb = args.first().and_then(|arg| arg.to_str()).unwrap_or("");
+        if matches!(verb, "fetch" | "push" | "ls-remote") {
             // Preserve configured SSH identities/options, while preventing an unseen
             // terminal passphrase prompt. Interactive auth remains in the shell.
             let configured = std::env::var("GIT_SSH_COMMAND")
@@ -290,8 +313,8 @@ impl Runner<'_> {
         })?;
         let mut stdout = child.stdout.take().unwrap();
         let stream_stdout = matches!(
-            args.first(),
-            Some(&"fetch" | &"push" | &"merge" | &"reset" | &"clean" | &"branch")
+            verb,
+            "fetch" | "push" | "merge" | "reset" | "clean" | "branch" | "worktree"
         );
         let recent_stdout = Arc::new(Mutex::new(Vec::<u8>::new()));
         let worker_stdout = Arc::clone(&recent_stdout);
@@ -392,7 +415,7 @@ impl Runner<'_> {
         if !status.success() {
             return Err(format!(
                 "git {} failed: {}\n{}\nInteractive authentication or conflict resolution can be handled with t in the shell.",
-                args[0],
+                display_name(&args[0]),
                 visible(&stderr.lock().unwrap()),
                 visible(&output)
             ));
@@ -400,7 +423,7 @@ impl Runner<'_> {
         Ok(output)
     }
 
-    fn text(&self, root: &Path, args: &[&str]) -> Result<String, String> {
+    pub(crate) fn text(&self, root: &Path, args: &[&str]) -> Result<String, String> {
         String::from_utf8(self.run(root, args)?)
             .map(|s| s.trim_end_matches('\n').to_owned())
             .map_err(|_| "Git reference is not valid UTF-8; use the shell".into())
@@ -508,6 +531,7 @@ pub fn inspect(path: &Path, cancel: &AtomicBool) -> Result<Repository, String> {
         &Runner {
             cancel,
             events: None,
+            read_only: false,
         },
     )
 }
@@ -795,6 +819,7 @@ pub fn prepare(
         &Runner {
             cancel,
             events: None,
+            read_only: false,
         },
     )
 }
@@ -1051,6 +1076,7 @@ impl GitPreview {
             &Runner {
                 cancel,
                 events: None,
+                read_only: false,
             },
         )
     }

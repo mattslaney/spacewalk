@@ -24,6 +24,7 @@ fn wait(app: &mut App) {
         || app.deleting.is_some()
         || app.file_task.is_some()
         || app.git_action.is_some()
+        || app.worktree_scan.is_some()
     {
         assert!(
             Instant::now() < deadline,
@@ -1161,4 +1162,75 @@ fn progress_panel_cancels_with_f4_and_does_not_route_action_shortcuts_to_the_bro
     assert!(matches!(app.modal, Some(Modal::Progress)));
     wait(&mut app);
     assert!(app.operation.is_none());
+}
+
+#[test]
+fn worktree_manager_lists_external_checkouts_and_routes_git_actions_and_shells() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let outside = tempfile::tempdir().unwrap();
+    let linked = outside.path().join("external checkout");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["worktree", "add", "-b", "topic"])
+        .arg(&linked)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    app.rescan();
+    wait(&mut app);
+    app.browser.as_mut().unwrap().select(0);
+    key(&mut app, KeyCode::Char('w'));
+    wait(&mut app);
+    assert!(matches!(app.modal, Some(Modal::Worktrees)));
+    let manager = app.worktrees.as_mut().unwrap();
+    assert_eq!(manager.rows.len(), 2);
+    assert!(
+        manager
+            .rows
+            .iter()
+            .any(|row| row.record.path == linked && row.bytes.is_some())
+    );
+    manager.selected = linked.clone();
+    key(&mut app, KeyCode::Char('m'));
+    assert!(app.worktrees.as_ref().unwrap().marked.contains(&linked));
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        let screen = render(&mut app, width, height);
+        if width >= 60 {
+            assert!(screen.contains("WORKTREES"));
+        }
+    }
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(panel)) if panel.repository.root == linked));
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    assert!(matches!(app.modal, Some(Modal::Worktrees)));
+    assert_eq!(app.worktrees.as_ref().unwrap().selected, linked);
+    assert!(app.worktrees.as_ref().unwrap().marked.contains(&linked));
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.shell.take().unwrap().directory, linked);
+    key(&mut app, KeyCode::Esc);
+    assert!(app.worktrees.is_none());
+    assert!(app.worktree_scan.is_none());
+}
+
+#[test]
+fn worktree_shortcut_is_contextual_and_available_from_git_panel() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    app.rescan();
+    wait(&mut app);
+    key(&mut app, KeyCode::Char('/'));
+    key(&mut app, KeyCode::Char('w'));
+    assert_eq!(app.browser.as_ref().unwrap().query, "w");
+    assert!(app.worktrees.is_none());
+    key(&mut app, KeyCode::Esc);
+    app.browser.as_mut().unwrap().select(0);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('w'));
+    wait(&mut app);
+    assert!(matches!(app.modal, Some(Modal::Worktrees)));
+    key(&mut app, KeyCode::Esc);
 }

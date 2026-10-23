@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::collections::BTreeMap;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -323,9 +323,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } else if marked > 0 {
             format!(" × {marked} marked · c copy · x cut · d delete · M clear")
         } else if area.width >= 100 {
-            " y path  c copy x cut p paste  a mkdir R rename  Ctrl+g Git  t shell  m mark  d del  ? help q".into()
+            " y path  c copy x cut p paste  a mkdir R rename  Ctrl+g Git w trees  t shell  m mark  d del  ? help q".into()
         } else {
-            " y path c copy x cut p paste a mkdir R rename ^g Git ? q".into()
+            " y path c copy x cut p paste a mkdir R rename ^g Git w trees ? q".into()
         };
         frame.render_widget(
             Paragraph::new(keys).style(Style::default().fg(MUTED)),
@@ -668,8 +668,12 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         draw_progress(frame, app);
         return;
     }
+    if matches!(modal, Modal::Worktrees) {
+        draw_worktrees(frame, app);
+        return;
+    }
     let (title, text, warning) = match modal {
-        Modal::Progress => unreachable!(),
+        Modal::Progress | Modal::Worktrees => unreachable!(),
         Modal::GitPanel(panel) if panel.report.is_some() => {
             let (command, text) = panel.report.as_ref().unwrap();
             (
@@ -686,7 +690,7 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
             (
                 " GIT ACTIONS ",
                 format!(
-                    "i Status · d Diff · v Branches · u Local commits · z Stashes\nF Fetch remotes and refresh comparisons\n\np Pull · P Push · c Clean checkout · r Reset to remote\n\nRepository: {}\nBranch: {}\nUpstream: {}\n\nOPTIONS (off by default)\nf [{}] Force Push with lease\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\n\n{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                    "i Status · d Diff · v Branches · u Local commits · z Stashes\nF Fetch remotes and refresh comparisons\nw Worktree inventory\n\np Pull · P Push · c Clean checkout · r Reset to remote\n\nRepository: {}\nBranch: {}\nUpstream: {}\n\nOPTIONS (off by default)\nf [{}] Force Push with lease\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\n\n{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
                     display_name(repo.root.as_os_str()),
                     repo.branch.as_deref().unwrap_or("detached"),
                     repo.upstream.as_ref().map_or_else(
@@ -765,7 +769,7 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F3                Show / hide operation progress\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git sync and cleanup panel\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F3                Show / hide operation progress\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git sync and cleanup panel\n  w                 Worktree inventory for this repository\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),
@@ -987,6 +991,154 @@ fn draw_progress(frame: &mut Frame, app: &App) {
             "Esc hide · F3 reopen · F4 cancel\n↑↓ / PgUp/PgDn scroll · End follow latest",
         )
         .style(Style::default().fg(MUTED)),
+        rows[4],
+    );
+}
+
+fn draw_worktrees(frame: &mut Frame, app: &App) {
+    let Some(manager) = &app.worktrees else {
+        return;
+    };
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(112);
+    let height = area.height.saturating_sub(2);
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(" WORKTREES · largest first ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(PANEL).fg(TEXT));
+    let inside = block.inner(rect);
+    frame.render_widget(block, rect);
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(3),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .split(inside);
+    frame.render_widget(
+        Paragraph::new(truncate(
+            &display_name(manager.common_dir.as_os_str()),
+            inside.width as usize,
+        ))
+        .style(Style::default().fg(MUTED)),
+        rows[0],
+    );
+    let entries = manager
+        .rows
+        .iter()
+        .map(|row| {
+            let mark = if manager.marked.contains(&row.record.path) {
+                "×"
+            } else {
+                " "
+            };
+            let size = row.bytes.map_or_else(
+                || {
+                    if row.record.bare {
+                        "bare".into()
+                    } else if row.measured {
+                        "unknown".into()
+                    } else {
+                        "measuring".into()
+                    }
+                },
+                human_size,
+            );
+            let mut flags = Vec::new();
+            if row.record.main {
+                flags.push("main");
+            }
+            if row.record.locked.is_some() {
+                flags.push("locked");
+            }
+            if row.record.prunable.is_some() {
+                flags.push("prunable");
+            }
+            if row.error.is_some() {
+                flags.push("unavailable");
+            }
+            if row.scan_errors > 0 {
+                flags.push("partial");
+            }
+            if row.state.as_ref().is_some_and(|state| state.dirty()) {
+                flags.push("changes");
+            }
+            let label = row.record.branch.as_deref().unwrap_or(if row.record.bare {
+                "bare hub"
+            } else {
+                "detached HEAD"
+            });
+            ListItem::new(vec![
+                Line::from(format!("{mark} {size:>10}  {label}  {}", flags.join(" · "))),
+                Line::from(Span::styled(
+                    format!("   {}", display_name(row.record.path.as_os_str())),
+                    Style::default().fg(MUTED),
+                )),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected(
+        manager
+            .rows
+            .iter()
+            .position(|row| row.record.path == manager.selected),
+    );
+    frame.render_stateful_widget(
+        List::new(entries).highlight_style(Style::default().bg(SELECTED).fg(ACCENT)),
+        rows[1],
+        &mut state,
+    );
+    if let Some(row) = manager.selected_row() {
+        let detail = if let Some(error) = &row.error {
+            crate::git_actions::visible(error.as_bytes())
+        } else if let Some(state) = &row.state {
+            format!(
+                "{} staged · {} modified · {} untracked · {} · ↑{} ↓{} (last fetched)",
+                state.staged,
+                state.modified,
+                state.untracked,
+                state.upstream.as_deref().unwrap_or("no upstream"),
+                state.ahead.map_or("?".into(), |n| n.to_string()),
+                state.behind.map_or("?".into(), |n| n.to_string())
+            )
+        } else if row.record.bare {
+            "Shared Git metadata; no checkout to measure.".into()
+        } else {
+            "Checking local state…".into()
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}\n{}",
+                display_name(row.record.path.as_os_str()),
+                detail
+            ))
+            .wrap(Wrap { trim: false }),
+            rows[2],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(crate::git_actions::visible(manager.message.as_bytes()))
+            .style(Style::default().fg(MUTED))
+            .wrap(Wrap { trim: false }),
+        rows[3],
+    );
+    let controls = if app.git_action.is_some() {
+        "Action running · F3 progress · F4 cancel\n↑↓ select · Esc close"
+    } else {
+        "↑↓ select · Enter Git · m mark · M clear · y path\nt shell · r refresh · Esc close"
+    };
+    frame.render_widget(
+        Paragraph::new(controls).style(Style::default().fg(ACCENT)),
         rows[4],
     );
 }

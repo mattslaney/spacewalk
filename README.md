@@ -95,6 +95,7 @@ spacewalk --help
 | a / R | Create a folder / rename the selected item |
 | F3 / F4 | Show or hide operation progress / request cancellation |
 | Ctrl+g | Open Git sync and cleanup actions |
+| w | Open the selected repository’s worktree inventory |
 | t | Open a shell in the selected directory, or the parent of a selected file |
 | r | Rescan the original directory and preserve the current view where possible |
 | h | Hide / show the selected file or directory in the treemap |
@@ -232,6 +233,22 @@ dialog. Use F4 to request cancellation; completed steps stay completed, and a
 cancelled push may need its remote outcome checked in the shell. File mutations,
 rescans, and shell launches wait while a Git job is active. For other Git work,
 close the panel and press `t` to open the shell.
+
+## Worktree inventory
+
+Press `w` on a repository or an item inside it, or from the Git action panel, to
+list all its registered worktrees. This includes checkouts outside the scanned
+directory and worktrees attached to a bare repository hub. Sizes update in the
+background, largest first, and include ignored dependencies and build output.
+Shared Git metadata is excluded from checkout sizes. Partial scans and unavailable
+paths are marked; reported usage is not a guarantee of space that can be freed.
+
+The view shows branch or detached HEAD, main/locked/prunable flags, local changes,
+and upstream state from last-fetched references. It does not fetch automatically.
+Use arrows to select, `m`/`M` to mark or clear marks, `y` to copy a path, `t` to
+open a shell, and `r` to refresh. Enter opens the usual Pull, Push, Clean checkout,
+and Reset to remote actions for the selected checkout. Closing those dialogs
+returns to the worktree list with the selection and marks preserved.
 
 ## Space accounting and deletion
 
