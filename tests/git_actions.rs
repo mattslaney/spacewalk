@@ -104,18 +104,15 @@ fn inspection_reports_explain_saved_and_unsaved_work_without_changing_it() {
     let before_refs = git(&f.work, &["show-ref"]);
     let before_index = fs::read(f.work.join(".git/index")).unwrap();
     let status = report(&f.work, GitCommand::Status);
-    assert!(status.contains("MM tracked"));
-    assert!(status.contains("?? untracked"));
-    assert!(status.contains("ahead 1"));
-    let diff = report(&f.work, GitCommand::Diff);
-    let (unstaged, staged) = diff.split_once("\nSTAGED CHANGES\n").unwrap();
-    assert!(unstaged.contains("+unstaged"));
-    assert!(!staged.contains("+unstaged"));
-    assert!(staged.contains("+staged"));
-    assert!(diff.contains("1 file changed"));
+    assert!(status.contains("Worktree: DIRTY"));
+    assert!(status.contains("Ahead: 1"));
+    assert!(status.contains("Behind: 0"));
+    assert!(!status.contains("MM tracked"));
+    assert!(!status.contains("?? untracked"));
     let branches = report(&f.work, GitCommand::Branches);
     assert!(branches.contains("local-feature"));
-    assert!(branches.contains("origin/main: ahead 1"));
+    assert!(branches.contains("origin/main"));
+    assert!(branches.contains("↑1 ahead"));
     let commits = report(&f.work, GitCommand::LocalCommits);
     assert!(commits.contains("local-only"));
     assert!(!commits.contains(" initial"));
@@ -142,17 +139,16 @@ fn reports_handle_unborn_detached_and_untracked_branches() {
     identity(temp.path());
     fs::write(temp.path().join("new"), "first\n").unwrap();
     git(temp.path(), &["add", "new"]);
-    assert!(report(temp.path(), GitCommand::Status).contains("A  new"));
-    assert!(report(temp.path(), GitCommand::Diff).contains("+first"));
-    assert!(report(temp.path(), GitCommand::Branches).contains("No local branches yet"));
+    assert!(report(temp.path(), GitCommand::Status).contains("Worktree: DIRTY"));
+    assert!(report(temp.path(), GitCommand::Branches).contains("No local-only branches"));
     assert!(report(temp.path(), GitCommand::LocalCommits).contains("No commits yet"));
     assert!(report(temp.path(), GitCommand::Stashes).contains("No stashes"));
     assert!(report(temp.path(), GitCommand::Fetch).contains("No remotes configured"));
     git(temp.path(), &["commit", "-m", "first"]);
-    assert!(report(temp.path(), GitCommand::LocalCommits).contains("No remote upstream"));
+    assert!(report(temp.path(), GitCommand::LocalCommits).contains("first"));
     git(temp.path(), &["switch", "--detach"]);
     assert!(report(temp.path(), GitCommand::Status).contains("detached HEAD"));
-    assert!(report(temp.path(), GitCommand::LocalCommits).contains("HEAD is detached"));
+    assert!(report(temp.path(), GitCommand::LocalCommits).contains("detached HEAD"));
 }
 
 #[test]
@@ -167,7 +163,7 @@ fn fetch_refreshes_tracking_refs_without_changing_local_work() {
     report(&f.work, GitCommand::Status);
     report(&f.work, GitCommand::Branches);
     assert_eq!(git(&f.work, &["rev-parse", "origin/main"]), old_tracking);
-    assert!(report(&f.work, GitCommand::Fetch).contains("behind 1"));
+    assert!(report(&f.work, GitCommand::Fetch).contains("Behind: 1"));
     assert_eq!(
         git(&f.work, &["rev-parse", "origin/main"]),
         git(&f.peer, &["rev-parse", "HEAD"])
@@ -179,23 +175,6 @@ fn fetch_refreshes_tracking_refs_without_changing_local_work() {
         "unstaged\n"
     );
     assert!(f.work.join("untracked").exists());
-}
-
-#[test]
-fn large_diff_limits_each_section_and_keeps_staged_changes_visible() {
-    let f = Fixture::new();
-    git(
-        &f.work,
-        &["config", "diff.external", "nonexistent-diff-tool"],
-    );
-    fs::write(f.work.join("tracked"), "staged content\n").unwrap();
-    git(&f.work, &["add", "tracked"]);
-    fs::write(f.work.join("tracked"), "many lines\n".repeat(1500)).unwrap();
-    let diff = report(&f.work, GitCommand::Diff);
-    assert!(diff.contains("Display limited"));
-    assert!(diff.contains("\nSTAGED CHANGES\n"));
-    assert!(diff.contains("+staged content"));
-    assert!(diff.lines().count() < 1100);
 }
 
 #[test]

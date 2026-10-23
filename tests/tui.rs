@@ -960,7 +960,6 @@ fn git_reports_stay_in_the_panel_and_return_to_the_same_menu_options() {
     key(&mut app, KeyCode::Char('f'));
     for (shortcut, command) in [
         ('i', GitCommand::Status),
-        ('d', GitCommand::Diff),
         ('v', GitCommand::Branches),
         ('u', GitCommand::LocalCommits),
         ('z', GitCommand::Stashes),
@@ -982,15 +981,7 @@ fn git_reports_stay_in_the_panel_and_return_to_the_same_menu_options() {
         }
         key(&mut app, KeyCode::PageDown);
         let _ = render(&mut app, 60, 20);
-        if command == GitCommand::Diff {
-            key(&mut app, KeyCode::End);
-            let _ = render(&mut app, 60, 20);
-            let end = app.modal_scroll;
-            assert!(end > 0 && end < u16::MAX);
-            key(&mut app, KeyCode::Up);
-            assert_eq!(app.modal_scroll, end - 1);
-        }
-        for action in ['c', 'r', 'p', 'P', 'y', 'f'] {
+        for action in ['c', 'P', 'y', 'f'] {
             key(&mut app, KeyCode::Char(action));
         }
         assert!(app.git_action.is_none());
@@ -1810,5 +1801,222 @@ fn ctrl_g_opens_the_selected_worktree_directory_file_and_directory_symlink() {
     open_git(&mut aliases);
     assert!(
         matches!(&aliases.modal, Some(Modal::GitPanel(panel)) if panel.repository.root == linked && panel.repository.linked_worktree)
+    );
+}
+
+fn git_ui(path: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim_end().into()
+}
+
+#[test]
+fn branch_list_selects_previews_cancels_deletes_and_refreshes_without_file_actions() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    git_ui(dir.path(), &["branch", "alpha"]);
+    git_ui(dir.path(), &["branch", "beta"]);
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('d'));
+    assert!(matches!(app.modal, Some(Modal::GitPanel(_))));
+    assert!(app.git_action.is_none());
+    assert!(!render(&mut app, 120, 42).contains("Diff"));
+    key(&mut app, KeyCode::Char('v'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Down);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if matches!(&p.entries[p.selected], spacewalk::git_manage::Entry::Branch(b) if b.name == "beta"))
+    );
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        render(&mut app, width, height);
+    }
+    key(&mut app, KeyCode::Char('d'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitManagePreview(p)) if p.text.contains("DELETE local branch: beta"))
+    );
+    let mut repeat = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(app.git_action.is_none());
+    key(&mut app, KeyCode::Enter);
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(p)) if p.selected == 1));
+    assert!(git_ui(dir.path(), &["branch", "--list", "beta"]).contains("beta"));
+    key(&mut app, KeyCode::Delete);
+    wait(&mut app);
+    assert!(render(&mut app, 60, 20).contains("[y] Execute action"));
+    key(&mut app, KeyCode::Char('y'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.report.as_ref().unwrap().0 == spacewalk::git_actions::GitCommand::Branches && p.entries.len() == 2)
+    );
+    assert!(git_ui(dir.path(), &["branch", "--list", "beta"]).is_empty());
+    assert!(dir.path().join("notes.txt").exists());
+    assert!(app.deleting.is_none());
+}
+
+#[test]
+fn stash_list_keeps_selection_and_deletes_just_the_confirmed_stash() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    for name in ["oldest", "middle", "newest"] {
+        fs::write(dir.path().join("notes.txt"), name).unwrap();
+        git_ui(dir.path(), &["stash", "push", "-m", name]);
+    }
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('z'));
+    wait(&mut app);
+    key(&mut app, KeyCode::End);
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(p)) if p.selected == 2));
+    key(&mut app, KeyCode::Char('d'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitManagePreview(p)) if p.text.contains("oldest") && p.text.contains("stash@{2}"))
+    );
+    key(&mut app, KeyCode::Esc);
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(p)) if p.selected == 2));
+    key(&mut app, KeyCode::Char('d'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Char('y'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.entries.len() == 2 && p.selected == 1)
+    );
+    let stashes = git_ui(dir.path(), &["stash", "list"]);
+    assert!(!stashes.contains("oldest"));
+    assert!(stashes.contains("middle") && stashes.contains("newest"));
+}
+
+#[test]
+fn git_lists_publish_selected_branches_and_push_pending_commits() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let remote = tempfile::tempdir().unwrap();
+    git_ui(remote.path(), &["init", "--bare", "--initial-branch=main"]);
+    git_ui(
+        dir.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git_ui(dir.path(), &["push", "-u", "origin", "main"]);
+    git_ui(dir.path(), &["branch", "publish-me"]);
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('v'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Char('s'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitManagePreview(p)) if p.text.contains("refs/heads/publish-me"))
+    );
+    key(&mut app, KeyCode::Char('y'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(p)) if p.entries.is_empty()));
+    assert_eq!(
+        git_ui(remote.path(), &["rev-parse", "publish-me"]),
+        git_ui(dir.path(), &["rev-parse", "HEAD"])
+    );
+    git_ui(
+        dir.path(),
+        &["commit", "--allow-empty", "-m", "pending-commit"],
+    );
+    key(&mut app, KeyCode::Char('u'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.entries.len() == 1 && p.entries[0].label().contains("pending-commit"))
+    );
+    key(&mut app, KeyCode::Char('p'));
+    wait(&mut app);
+    assert!(matches!(app.modal, Some(Modal::GitManagePreview(_))));
+    key(&mut app, KeyCode::Char('y'));
+    wait(&mut app);
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(p)) if p.entries.is_empty()));
+    assert_eq!(
+        git_ui(remote.path(), &["rev-parse", "main"]),
+        git_ui(dir.path(), &["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
+fn git_status_uses_colors_and_shell_returns_to_the_same_git_context() {
+    use ratatui::style::Color;
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let remote = tempfile::tempdir().unwrap();
+    git_ui(remote.path(), &["init", "--bare", "--initial-branch=main"]);
+    git_ui(
+        dir.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git_ui(dir.path(), &["push", "-u", "origin", "main"]);
+    git_ui(dir.path(), &["commit", "--allow-empty", "-m", "pending"]);
+    fs::write(dir.path().join("notes.txt"), "uncommitted").unwrap();
+    app.rescan();
+    wait(&mut app);
+    open_git(&mut app);
+    key(&mut app, KeyCode::Char('f'));
+    key(&mut app, KeyCode::Char('i'));
+    wait(&mut app);
+    let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    for (label, value, expected) in [
+        ("Worktree:", 'D', Color::Rgb(250, 188, 111)),
+        ("Ahead:", '1', Color::Rgb(250, 188, 111)),
+        ("Behind:", '0', Color::Rgb(107, 226, 188)),
+    ] {
+        let y = (0..42)
+            .find(|&y| {
+                (0..120)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains(label)
+            })
+            .unwrap();
+        let x = (0..120)
+            .find(|&x| buffer[(x, y)].symbol() == value.to_string())
+            .unwrap();
+        assert_eq!(buffer[(x, y)].fg, expected);
+    }
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(panel)) if !panel.report.as_ref().unwrap().1.contains("notes.txt"))
+    );
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.shell.take().unwrap().directory, dir.path());
+    assert!(matches!(&app.modal, Some(Modal::GitPanel(p)) if p.options.force));
+    git_ui(dir.path(), &["restore", "notes.txt"]);
+    app.shell_finished(Err(std::io::Error::other("fixture shell return")));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.report.as_ref().unwrap().1.contains("Worktree: CLEAN") && p.options.force)
+    );
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.shell.take().unwrap().directory, dir.path());
+    app.shell_finished(Err(std::io::Error::other("fixture shell return")));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::GitPanel(p)) if p.report.is_none() && p.options.force)
     );
 }

@@ -173,11 +173,11 @@ its parent repository's branch and shared history are retained.
 
 | Panel key | Action |
 | --- | --- |
-| i | Show Status: branch, staged, unstaged, and untracked changes |
-| d | Show Diff: file summaries and patches for unstaged and staged changes |
-| v | Show local Branches and their upstream tracking state |
-| u | Show Local commits: current-branch commits absent from its last-fetched upstream |
-| z | List repository-wide Stashes |
+| i | Show clean/dirty state and commits ahead/behind the upstream |
+| v | Select local-only branches and branches with unpushed commits; sync or delete |
+| u | List commits on HEAD absent from fetched remote refs; push the branch |
+| z | Select and delete individual repository-wide stashes |
+| t | Open a shell here; exit returns to this Git panel |
 | F | Fetch configured remotes and refresh Git indicators |
 | w | Open the repository’s worktree manager |
 | D | Preview deletion of this linked worktree (shown only for linked worktrees) |
@@ -189,26 +189,55 @@ its parent repository's branch and shared history are retained.
 | b | Toggle deleting other local branches during Reset (default: off) |
 | s | Toggle clearing repository-wide stashes during Reset (default: off) |
 
-Inspection opens immediately in the floating panel. Use arrows, PageUp/PageDown,
-or Home/End to scroll; Esc or Enter returns to the Git menu with its options
-preserved. The inspection shortcuts also work inside reports. Each output section
-is limited to 1,000 lines or 128 KiB; Local commits shows at most 200 commits.
-Diff includes tracked files; use Status to see untracked files.
+Status shows only checkout cleanliness and ahead/behind counts, without file
+listings. Counts use the configured upstream’s last-fetched refs; missing upstreams
+or refs show as unknown. Headers, labels, status values, commands and warnings use
+contrasting colors in floating panels. Use arrows, PageUp/PageDown or Home/End to
+scroll Status and previews; Esc or Enter returns to the Git menu.
 
-Fetch runs immediately with live progress, updates remote-tracking refs without
-merging, and refreshes the indicators. It does not prune refs or fetch tags or
-submodules. Inspection uses local data and does not contact remotes.
+Branches, Local commits and Stashes are selectable lists. Use arrows or
+PageUp/PageDown to select, Home/End for the first/last row, and `r` to refresh.
+Inspection shortcuts work across reports, and `t` opens a shell in the displayed
+repository or worktree. The same menu or list refreshes when the shell returns.
+Diff is available through the shell.
 
-Pull, Push, Clean checkout, and Reset to remote open scrollable previews. Press
-`y` to execute; Enter, `n`, or Esc cancels. Preparation may fetch remote references,
-but checkout changes, deletion, and pushes require confirmation. If the repository changes after the preview,
-Spacewalk asks for a fresh preview.
+In **Branches**, `s` previews Sync and `d`/Delete previews deleting the selected
+local branch. Sync fetches its upstream, fast-forwards if possible, then pushes
+pending commits. It never rebases or force-pushes. An unchecked branch can advance
+without changing the current checkout; a branch checked out in another worktree
+syncs there. Dirty checkouts cannot be fast-forwarded. Divergence requires the
+shell. A branch without a remote upstream publishes to `origin`, or the only
+configured remote; ambiguous targets require upstream configuration in the shell.
+The destination appears in the preview. Checked-out branches and branches in
+interrupted rebase/bisect operations cannot be deleted. Branch deletion keeps
+remote branches and working files, but unpushed commits may lose their local ref.
+
+In **Local commits**, `p` previews pushing the current branch’s pending commits,
+including publishing it when no upstream exists. The list compares HEAD with all
+fetched remote refs and shows at most 200 commits. Push publishes the whole
+branch; it does not cherry-pick a selected commit. Detached commits need an
+attached branch before pushing.
+
+In **Stashes**, `d`/Delete previews deleting just the selected stash. Stashes are
+shared across linked worktrees. Selectors and object IDs are rechecked before
+deletion so a changed stash list requires a fresh preview.
+
+Sync, Push, branch deletion and stash deletion require `y` at their confirmation
+preview; Enter or Esc cancels. Lists retain selection where possible and refresh
+after results. Fetch is explicit; listing and Status never contact remotes.
+`F` fetches configured remotes and refreshes indicators without merging, pruning,
+or fetching tags or submodules.
+
+The main menu’s Pull, Push, Clean checkout and Reset to remote also open previews.
+Preparation may fetch refs; checkout changes, deletion and pushes require `y`.
+Enter, `n` or Esc cancels. Repository changes require a fresh preview.
 
 **Pull** fetches the configured upstream and fast-forwards to its previewed commit.
 Divergent histories require the shell. **Push** sends only the current branch to
 its configured upstream. Force is optional and uses an explicit lease on the
 remote commit shown in the preview; a concurrent remote update rejects the push.
-Remote actions require an attached branch with an upstream.
+These main-menu Pull/Push/Reset actions require an attached branch with an upstream.
+Publishing branches without upstreams is available through Branches or Local commits.
 
 **Clean checkout** restores tracked files and the index to `HEAD`, then removes
 untracked and ignored files, including build output. It keeps local commits,
@@ -237,7 +266,7 @@ without interactive password prompts. Errors and results remain in a scrollable
 dialog. Use F4 to request cancellation; completed steps stay completed, and a
 cancelled push may need its remote outcome checked in the shell. File mutations,
 rescans, and shell launches wait while a Git job is active. For other Git work,
-close the panel and press `t` to open the shell.
+press `t` in Git Operations to open the shell.
 
 ## Worktree management
 
@@ -345,7 +374,7 @@ are also available individually. Cargo commands use the committed lockfile.
 
 The tests exercise scanning, hard links and symlinks, sparse files, treemap coverage and hit testing, keyboard and mouse synchronization, filtering, sorting, view restoration, clipboard handling, Git status, deletion, terminal sizes, and the summary CLI. Git tests use temporary local repositories and remotes; deletion tests operate only on temporary fixtures. The screenshot above is rendered from synthetic data using Ratatui's test backend.
 
-The code separates filesystem scanning (`scan`), navigation state (`browser`), weighted map layout (`treemap`), Git checks (`git`), clipboard copying (`clipboard`), deletion (`delete`), event handling (`app`), and rendering (`ui`). The interface uses [Ratatui](https://docs.rs/ratatui/0.30.2/ratatui/) and [Crossterm](https://docs.rs/crossterm/0.29.0/crossterm/).
+The code separates filesystem scanning (`scan`), navigation state (`browser`), weighted map layout (`treemap`), Git checks (`git`), selectable reports and branch/stash actions (`git_manage`), clipboard copying (`clipboard`), deletion (`delete`), event handling (`app`), and rendering (`ui`). The interface uses [Ratatui](https://docs.rs/ratatui/0.30.2/ratatui/) and [Crossterm](https://docs.rs/crossterm/0.29.0/crossterm/).
 
 ### Publishing a release
 

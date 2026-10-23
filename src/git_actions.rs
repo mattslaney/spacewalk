@@ -42,7 +42,6 @@ impl GitAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitCommand {
     Status,
-    Diff,
     Branches,
     LocalCommits,
     Stashes,
@@ -53,7 +52,6 @@ impl GitCommand {
     pub fn label(self) -> &'static str {
         match self {
             Self::Status => "Status",
-            Self::Diff => "Diff",
             Self::Branches => "Branches",
             Self::LocalCommits => "Local commits",
             Self::Stashes => "Stashes",
@@ -131,7 +129,7 @@ pub struct GitPreview {
     pub action: GitAction,
     pub options: GitOptions,
     pub text: String,
-    target: String,
+    pub(crate) target: String,
     remote_expected: String,
     delete_branches: Vec<(String, String)>,
     fingerprint: Fingerprint,
@@ -152,6 +150,11 @@ pub enum GitJob {
         options: GitOptions,
     },
     Execute(Box<GitPreview>),
+    ManagePreview {
+        path: PathBuf,
+        action: crate::git_manage::Action,
+    },
+    ManageExecute(Box<crate::git_manage::Preview>),
     WorktreePreview(crate::worktree_actions::WorktreeRequest),
     WorktreeExecute(Box<crate::worktree_actions::WorktreePreview>),
 }
@@ -160,9 +163,10 @@ pub enum GitEvent {
     Inspected(Result<Repository, String>),
     Reported {
         command: GitCommand,
-        result: Result<String, String>,
+        result: Result<crate::git_manage::Report, String>,
     },
     Previewed(Result<Box<GitPreview>, String>),
+    ManagePreviewed(Result<Box<crate::git_manage::Preview>, String>),
     Finished(Result<String, String>),
     WorktreePreviewed(Result<Box<crate::worktree_actions::WorktreePreview>, String>),
 }
@@ -187,11 +191,13 @@ impl GitActionTask {
                 GitJob::InspectRoot(path) => GitEvent::Inspected(inspect_root(&path, &runner)),
                 GitJob::Report { path, command } => GitEvent::Reported {
                     command,
-                    result: inspect_root(&path, &runner).and_then(|_| report_with(&path, command, &runner)),
+                    result: crate::git_manage::load(&path, command, &runner),
                 },
                 GitJob::InspectCheckout(path) => GitEvent::Inspected(inspect_checkout(&path, &runner)),
                 GitJob::Preview { path, action, options } => GitEvent::Previewed(inspect_checkout(&path, &runner).and_then(|_| prepare_with(&path, action, options, &runner)).map(Box::new)),
                 GitJob::Execute(preview) => GitEvent::Finished(execute_with(&preview, &runner).map_err(|e| format!("{e}\n\nSome steps may have completed. Refresh and review before retrying."))),
+                GitJob::ManagePreview { path, action } => GitEvent::ManagePreviewed(crate::git_manage::prepare_with(&path, action, &runner).map(Box::new)),
+                GitJob::ManageExecute(preview) => GitEvent::Finished(crate::git_manage::execute_with(&preview, &runner).map_err(|error| format!("{error}\n\nSome steps may have completed. Refresh before retrying."))),
                 GitJob::WorktreePreview(request) => GitEvent::WorktreePreviewed(crate::worktree_actions::prepare_with(request, &runner).map(Box::new)),
                 GitJob::WorktreeExecute(preview) => GitEvent::Finished(crate::worktree_actions::execute_with(&preview, &runner)),
             };
@@ -585,7 +591,7 @@ fn inspect_with(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> 
     })
 }
 
-fn inspect_root(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> {
+pub(crate) fn inspect_root(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> {
     let repo = inspect_with(path, runner)?;
     let expected = path.canonicalize().map_err(|e| e.to_string())?;
     if repo.root != expected {
@@ -643,10 +649,17 @@ pub fn report(path: &Path, command: GitCommand, cancel: &AtomicBool) -> Result<S
     )
 }
 
-fn report_with(path: &Path, command: GitCommand, runner: &Runner<'_>) -> Result<String, String> {
+pub(crate) fn report_with(
+    path: &Path,
+    command: GitCommand,
+    runner: &Runner<'_>,
+) -> Result<String, String> {
     let repo = inspect_with(path, runner)?;
-    if repo.bare && matches!(command, GitCommand::Status | GitCommand::Diff) {
-        return Err("A bare repository has no checkout for Status or Diff. Select one in w Worktree manager.".into());
+    if repo.bare && matches!(command, GitCommand::Status) {
+        return Err(
+            "A bare repository has no checkout for Status. Select one in w Worktree manager."
+                .into(),
+        );
     }
     let root = &repo.root;
     let mut text = format!(
@@ -656,66 +669,16 @@ fn report_with(path: &Path, command: GitCommand, runner: &Runner<'_>) -> Result<
     );
     match command {
         GitCommand::Status => {
-            text.push_str(&report_output(
-                &runner.run(
-                    root,
-                    &[
-                        "status",
-                        "--short",
-                        "--branch",
-                        "--show-stash",
-                        "--untracked-files=normal",
-                    ],
-                )?,
-                "Clean working tree.",
+            let state = crate::worktrees::local_state(root, runner)?;
+            text.push_str(&format!("Worktree: {}\nUpstream: {}\nAhead: {}\nBehind: {}\n\nComparisons use last-fetched refs. F Fetch refreshes them.\n",
+                if state.dirty() { "DIRTY" } else { "CLEAN" },
+                state.upstream.as_deref().unwrap_or("not configured"),
+                state.ahead.map_or("unknown".into(), |n| n.to_string()),
+                state.behind.map_or("unknown".into(), |n| n.to_string()),
             ));
-            text.push_str("\nFile columns: index / working tree; ?? means untracked.\nRemote comparisons use last-fetched refs; F Fetch updates them.");
         }
-        GitCommand::Diff => {
-            // Ignore external diff/text conversion tools and terminal color settings.
-            // Show both sections even when one patch exceeds the display limit.
-            for (heading, cached) in [("UNSTAGED CHANGES", false), ("STAGED CHANGES", true)] {
-                let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
-                if cached {
-                    args.push("--cached");
-                }
-                text.push_str(heading);
-                text.push('\n');
-                args.push("--stat");
-                text.push_str(&report_output(&runner.run(root, &args)?, "No changes.\n"));
-                args.pop();
-                args.push("--patch");
-                text.push_str(&report_output(&runner.run(root, &args)?, ""));
-                text.push('\n');
-            }
-            text.push_str("Untracked files are listed in Status; they are not included in Diff.");
-        }
-        GitCommand::Branches => {
-            text.push_str(&report_output(
-                &runner.run(root, &["branch", "--list", "-vv", "--no-color"])?,
-                "No local branches yet.\n",
-            ));
-            text.push_str("\n* current branch; + checked out in another worktree.\nTracking information uses last-fetched refs; F Fetch updates them.");
-        }
-        GitCommand::LocalCommits => {
-            if repo.head.is_none() {
-                text.push_str("No commits yet.");
-            } else if let Some(upstream) = &repo.upstream {
-                text.push_str("Current-branch commits absent from its upstream (last-fetched refs).\nAt most 200 commits are shown. F Fetch updates the comparison.\n\n");
-                text.push_str(&report_output(&runner.run(root, &[
-                    "log", "--oneline", "--no-decorate", "--no-color", "--no-show-signature",
-                    "-200", &format!("{}..HEAD", upstream.tracking_ref), "--",
-                ]).map_err(|error| format!("Cannot compare with the upstream. Try F Fetch, then reopen Local commits.\n{error}"))?, "No local commits ahead of the upstream."));
-            } else {
-                text.push_str("No remote upstream is configured for the current branch, or HEAD is detached.\nCheck Branches for other local work; configure an upstream in the shell to compare commits.");
-            }
-        }
-        GitCommand::Stashes => {
-            text.push_str("Saved changes shared by this repository and its linked worktrees.\n\n");
-            text.push_str(&report_output(
-                &runner.run(root, &["stash", "list", "--no-color", "--format=%gd %s"])?,
-                "No stashes.",
-            ));
+        GitCommand::Branches | GitCommand::LocalCommits | GitCommand::Stashes => {
+            return Ok(crate::git_manage::list(repo, command, runner)?.text);
         }
         GitCommand::Fetch => {
             if runner.run(root, &["remote"])?.is_empty() {
@@ -734,6 +697,10 @@ fn report_with(path: &Path, command: GitCommand, runner: &Runner<'_>) -> Result<
                     ],
                 )?;
                 text.push_str("Fetch complete. Remote comparisons have been refreshed.\n\n");
+                if !repo.bare {
+                    text.push_str(&report_with(root, GitCommand::Status, runner)?);
+                    return Ok(text);
+                }
                 let args: &[&str] = if repo.bare {
                     &["branch", "--list", "-vv", "--no-color"]
                 } else {
@@ -931,7 +898,7 @@ pub fn prepare(
     )
 }
 
-fn prepare_with(
+pub(crate) fn prepare_with(
     path: &Path,
     action: GitAction,
     options: GitOptions,
@@ -1192,7 +1159,7 @@ impl GitPreview {
     }
 }
 
-fn execute_with(preview: &GitPreview, runner: &Runner<'_>) -> Result<String, String> {
+pub(crate) fn execute_with(preview: &GitPreview, runner: &Runner<'_>) -> Result<String, String> {
     preview.anchor.validate().map_err(|e| e.to_string())?;
     let root = &preview.repository.root;
     inspect_checkout(root, runner)?;

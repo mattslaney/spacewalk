@@ -10,7 +10,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::collections::BTreeMap;
@@ -659,6 +659,216 @@ fn draw_legend(frame: &mut Frame, b: &Browser, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+fn styled_panel_line(line: String) -> Line<'static> {
+    let lower = line.to_lowercase();
+    if line.starts_with("DELETE")
+        || line.contains("DIRTY")
+        || lower.contains("failed")
+        || lower.contains("error:")
+        || line.contains("permanently")
+        || line.contains("Force: ON")
+    {
+        return Line::styled(line, Style::default().fg(WARN).bold());
+    }
+    if line.starts_with("git ") {
+        return Line::styled(line, Style::default().fg(ACCENT));
+    }
+    if let Some((label, value)) = line.split_once(": ") {
+        let color = if value == "CLEAN" || ((label == "Ahead" || label == "Behind") && value == "0")
+        {
+            ACCENT
+        } else if (label == "Ahead" || label == "Behind") && value != "unknown" {
+            WARN
+        } else {
+            TEXT
+        };
+        return Line::from(vec![
+            Span::styled(format!("{label}: "), Style::default().fg(MUTED).bold()),
+            Span::styled(value.to_owned(), Style::default().fg(color)),
+        ]);
+    }
+    if !line.is_empty() && line.chars().any(char::is_alphabetic) && line.to_uppercase() == line {
+        return Line::styled(line, Style::default().fg(ACCENT).bold());
+    }
+    let parts: Vec<_> = line.split(" · ").collect();
+    let mut spans = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+        }
+        if let Some((key, rest)) = part.split_once(' ')
+            && matches!(
+                key,
+                "i" | "v"
+                    | "u"
+                    | "z"
+                    | "F"
+                    | "w"
+                    | "p"
+                    | "P"
+                    | "c"
+                    | "r"
+                    | "f"
+                    | "l"
+                    | "b"
+                    | "s"
+                    | "t"
+                    | "D"
+            )
+        {
+            spans.push(Span::styled(
+                key.to_owned(),
+                Style::default().fg(ACCENT).bold(),
+            ));
+            spans.push(Span::raw(format!(" {rest}")));
+        } else {
+            spans.push(Span::raw((*part).to_owned()));
+        }
+    }
+    Line::from(spans)
+}
+fn styled_panel_text(text: &str) -> Text<'static> {
+    Text::from(
+        crate::git_actions::visible(text.as_bytes())
+            .lines()
+            .map(|line| styled_panel_line(line.to_owned()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn draw_git_list(frame: &mut Frame, app: &App) {
+    use crate::git_actions::GitCommand;
+    let Some(Modal::GitPanel(panel)) = &app.modal else {
+        return;
+    };
+    let Some((command, text)) = &panel.report else {
+        return;
+    };
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(108);
+    let height = area.height.saturating_sub(2).min(38);
+    let rect = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, rect);
+    let block = Block::default()
+        .title(format!(" GIT OPERATIONS · {} ", command.label()))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT))
+        .style(Style::default().bg(PANEL).fg(TEXT));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(2),
+        Constraint::Length(2),
+        Constraint::Length(if panel.error.is_some() { 3 } else { 0 }),
+        Constraint::Length(3),
+    ])
+    .split(inner);
+    let branch = panel
+        .repository
+        .branch
+        .as_deref()
+        .unwrap_or("detached HEAD");
+    let summary = match command {
+        GitCommand::Branches => {
+            format!("{} branches · local-only or unpushed", panel.entries.len())
+        }
+        GitCommand::LocalCommits => {
+            format!("{} unpushed commits shown (max 200)", panel.entries.len())
+        }
+        GitCommand::Stashes => format!("{} stashes · shared across worktrees", panel.entries.len()),
+        _ => String::new(),
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                truncate(
+                    &display_name(panel.repository.root.as_os_str()),
+                    inner.width as usize,
+                ),
+                Style::default().fg(MUTED),
+            )),
+            Line::from(vec![
+                Span::styled(format!("Branch: {branch}  "), Style::default().fg(ACCENT)),
+                Span::styled("last-fetched refs · r refresh", Style::default().fg(MUTED)),
+            ]),
+            Line::from(Span::styled(summary, Style::default().fg(MUTED))),
+        ]),
+        rows[0],
+    );
+    if panel.entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(styled_panel_text(text)).wrap(Wrap { trim: false }),
+            rows[1],
+        );
+    } else {
+        let entries = panel
+            .entries
+            .iter()
+            .map(|entry| {
+                ListItem::new(vec![
+                    Line::from(Span::styled(
+                        crate::git_actions::visible(entry.label().as_bytes()),
+                        Style::default().fg(ACCENT).bold(),
+                    )),
+                    Line::from(Span::styled(
+                        crate::git_actions::visible(entry.detail().as_bytes()),
+                        Style::default().fg(MUTED),
+                    )),
+                ])
+            })
+            .collect::<Vec<_>>();
+        let mut state = ListState::default().with_selected(Some(panel.selected));
+        frame.render_stateful_widget(
+            List::new(entries)
+                .highlight_symbol("› ")
+                .highlight_style(Style::default().bg(SELECTED).bold()),
+            rows[1],
+            &mut state,
+        );
+        if let Some(entry) = panel.entries.get(panel.selected) {
+            frame.render_widget(
+                Paragraph::new(styled_panel_text(&entry.detail())).wrap(Wrap { trim: false }),
+                rows[2],
+            );
+        }
+    }
+    if let Some(error) = &panel.error {
+        frame.render_widget(
+            Paragraph::new(crate::git_actions::visible(error.as_bytes()))
+                .style(Style::default().fg(WARN))
+                .wrap(Wrap { trim: false }),
+            rows[3],
+        );
+    }
+    let actions = match command {
+        GitCommand::Branches => "s Sync selected branch · d Delete selected branch",
+        GitCommand::LocalCommits => "p Push branch (all pending commits)",
+        GitCommand::Stashes => "d Delete selected stash (repository-wide)",
+        _ => "",
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            styled_panel_line(actions.into()),
+            Line::from(Span::styled(
+                "↑↓ / PgUp/PgDn select · r refresh · t shell · Esc Git menu",
+                Style::default().fg(MUTED),
+            )),
+            Line::from(Span::styled(
+                "i Status · v Branches · u Local commits · z Stashes · F Fetch",
+                Style::default().fg(MUTED),
+            )),
+        ]),
+        rows[4],
+    );
+}
+
 fn draw_modal(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let Some(modal) = app.modal.as_ref() else {
@@ -670,6 +880,11 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
     }
     if matches!(modal, Modal::Worktrees) {
         draw_worktrees(frame, app);
+        return;
+    }
+    if matches!(modal, Modal::GitPanel(panel) if panel.report.as_ref().is_some_and(|r| matches!(r.0, crate::git_actions::GitCommand::Branches | crate::git_actions::GitCommand::LocalCommits | crate::git_actions::GitCommand::Stashes)))
+    {
+        draw_git_list(frame, app);
         return;
     }
     let (title, text, warning) = match modal {
@@ -703,7 +918,12 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
             (
                 command.label(),
                 format!(
-                    "↑/↓ PgUp/PgDn Home/End scroll · Esc returns to Git menu\ni Status · d Diff · v Branches · u Local commits · z Stashes · F Fetch\n\n{text}"
+                    "↑/↓ PgUp/PgDn Home/End scroll · Esc returns to Git menu\ni Status · v Branches · u Local commits · z Stashes · F Fetch · t Shell\n\n{text}\n{error}",
+                    error = panel
+                        .error
+                        .as_ref()
+                        .map(|error| format!("Error: {error}"))
+                        .unwrap_or_default()
                 ),
                 false,
             )
@@ -724,9 +944,9 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
             };
             let enabled = |value| if value { "x" } else { " " };
             let commands = if repo.bare {
-                "w Worktree manager\nv Branches · u Local commits · z Stashes · F Fetch\n\nBare repository: select a checkout in the worktree manager\nfor Status, Diff, Pull, Push, Clean or Reset."
+                "w Worktree manager\nv Branches · u Local commits · z Stashes · F Fetch\n\nBare repository: select a checkout in the worktree manager\nfor Status, Pull, Push, Clean or Reset."
             } else {
-                "w Worktree manager\ni Status · d Diff · v Branches · u Local commits · z Stashes\nF Fetch remotes and refresh comparisons\n\np Pull · P Push · c Clean checkout · r Reset to remote"
+                "w Worktree manager\ni Status · v Branches · u Local commits · z Stashes\nF Fetch remotes and refresh comparisons\n\np Pull · P Push · c Clean checkout · r Reset to remote"
             };
             let options = if repo.bare {
                 String::new()
@@ -742,18 +962,23 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
             (
                 " GIT OPERATIONS ",
                 format!(
-                    "{commands}\n{worktree_action}\n{kind}: {}\nBranch: {}\nUpstream: {}\n\n{options}{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                    "{commands}\n{worktree_action}\n{kind}: {}\nBranch: {}\nUpstream: {}\n\n{options}{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nt Open shell here (exit returns to this panel).\n↑/↓ or PgUp/PgDn scroll · Esc closes",
                     display_name(repo.root.as_os_str()),
                     repo.branch.as_deref().unwrap_or("detached"),
                     repo.upstream.as_ref().map_or_else(
                         || "not configured (Pull/Push/Reset disabled)".into(),
                         |u| format!("{} / {}", u.remote, u.remote_ref)
                     ),
-                    panel.error.as_deref().unwrap_or("")
+                    panel
+                        .error
+                        .as_ref()
+                        .map(|error| format!("Error: {error}"))
+                        .unwrap_or_default()
                 ),
                 false,
             )
         }
+        Modal::GitManagePreview(preview) => (" CONFIRM GIT ACTION ", preview.text.clone(), true),
         Modal::GitPreview(preview) => (
             " CONFIRM GIT ACTION ",
             format!(
@@ -927,14 +1152,17 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         usize::from(app.modal_scroll).min(lines.saturating_sub(inside.height as usize)) as u16;
     app.modal_scroll = scroll;
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(styled_panel_text(&text))
             .style(Style::default().fg(TEXT))
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0)),
         inside,
     );
     if warning {
-        let confirmation = if matches!(modal, Modal::GitPreview(_) | Modal::WorktreePreview(_)) {
+        let confirmation = if matches!(
+            modal,
+            Modal::GitPreview(_) | Modal::GitManagePreview(_) | Modal::WorktreePreview(_)
+        ) {
             "[y] Execute action   [n / Esc / Enter] Cancel"
         } else {
             "[y] Delete permanently   [n / Esc / Enter] Cancel"
@@ -1021,13 +1249,13 @@ fn draw_progress(frame: &mut Frame, app: &App) {
         for ch in message.chars() {
             let width = ch.width().unwrap_or(0);
             if used + width > log_area.width as usize && !line.is_empty() {
-                lines.push(Line::from(std::mem::take(&mut line)));
+                lines.push(styled_panel_line(std::mem::take(&mut line)));
                 used = 0;
             }
             line.push(ch);
             used += width;
         }
-        lines.push(Line::from(line));
+        lines.push(styled_panel_line(line));
     }
     let end = lines
         .len()

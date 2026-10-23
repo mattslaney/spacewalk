@@ -5,6 +5,7 @@ pub mod delete;
 pub mod files;
 pub mod git;
 pub mod git_actions;
+pub mod git_manage;
 pub mod operation;
 pub mod scan;
 pub mod shell;

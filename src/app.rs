@@ -10,6 +10,7 @@ use crate::{
     git_actions::{
         GitAction, GitActionTask, GitCommand, GitEvent, GitJob, GitOptions, GitPreview, Repository,
     },
+    git_manage::{self, Entry as GitEntry},
     operation::OperationProgress,
     scan::{Identity, Kind, Options, Progress, ScanEvent, ScanTask, Snapshot},
     shell::ShellRequest,
@@ -44,6 +45,7 @@ pub enum Modal {
     },
     GitPanel(GitPanel),
     GitPreview(Box<GitPreview>),
+    GitManagePreview(Box<git_manage::Preview>),
     Progress,
     Worktrees,
     WorktreeRemove {
@@ -55,11 +57,14 @@ pub enum Modal {
     WorktreePreview(Box<WorktreePreview>),
 }
 
+#[derive(Clone)]
 pub struct GitPanel {
     pub repository: Repository,
     pub options: GitOptions,
     pub error: Option<String>,
     pub report: Option<(GitCommand, String)>,
+    pub entries: Vec<GitEntry>,
+    pub selected: usize,
 }
 
 pub enum FileInputKind {
@@ -241,6 +246,7 @@ pub struct App {
     pub operation_status: String,
     pub operation: Option<OperationProgress>,
     git_panel_return: Option<GitPanel>,
+    manage_return: Option<GitPanel>,
     worktree_panel_return: Option<GitPanel>,
     pub worktrees: Option<WorktreeManager>,
     pub worktree_scan: Option<WorktreeScanTask>,
@@ -276,6 +282,7 @@ impl App {
             operation_status: String::new(),
             operation: None,
             git_panel_return: None,
+            manage_return: None,
             worktree_panel_return: None,
             worktrees: None,
             worktree_scan: None,
@@ -333,6 +340,17 @@ impl App {
             Ok(status) => format!("Terminal: shell exited with {status}. Press r to refresh."),
             Err(error) => format!("Terminal unavailable: {error}"),
         });
+        if let Some(Modal::GitPanel(panel)) = &self.modal {
+            if let Some((command, _)) = &panel.report {
+                self.load_git_report(*command);
+            } else {
+                let path = panel.repository.root.clone();
+                if let Some(Modal::GitPanel(panel)) = self.modal.take() {
+                    self.git_panel_return = Some(panel);
+                }
+                self.start_git_job(GitJob::InspectRoot(path));
+            }
+        }
         self.refresh_worktrees();
     }
 
@@ -403,27 +421,77 @@ impl App {
                     self.modal_scroll = 0;
                     match event {
                         GitEvent::Inspected(Ok(repository)) => {
-                            self.modal = Some(Modal::GitPanel(GitPanel {
-                                repository,
-                                options: GitOptions::default(),
-                                error: None,
-                                report: None,
-                            }))
+                            let mut panel =
+                                self.git_panel_return.take().unwrap_or_else(|| GitPanel {
+                                    repository: repository.clone(),
+                                    options: GitOptions::default(),
+                                    error: None,
+                                    report: None,
+                                    entries: Vec::new(),
+                                    selected: 0,
+                                });
+                            panel.repository = repository;
+                            self.modal = Some(Modal::GitPanel(panel));
                         }
                         GitEvent::Reported { command, result } => {
-                            let text = result.unwrap_or_else(|error| error);
-                            self.modal =
-                                Some(if let Some(mut panel) = self.git_panel_return.take() {
-                                    panel.report = Some((command, text));
-                                    Modal::GitPanel(panel)
-                                } else {
-                                    Modal::Result {
-                                        title: command.label().into(),
-                                        text,
+                            let mut panel = self.git_panel_return.take();
+                            match result {
+                                Ok(report) => {
+                                    if let Some(panel) = panel.as_mut() {
+                                        let selected = panel
+                                            .entries
+                                            .get(panel.selected)
+                                            .map(GitEntry::identity);
+                                        panel.repository = report.repository;
+                                        panel.entries = report.entries;
+                                        panel.selected = selected
+                                            .and_then(|id| {
+                                                panel
+                                                    .entries
+                                                    .iter()
+                                                    .position(|e| e.identity() == id)
+                                            })
+                                            .unwrap_or(
+                                                panel
+                                                    .selected
+                                                    .min(panel.entries.len().saturating_sub(1)),
+                                            );
+                                        panel.report = Some((command, report.text));
+                                        panel.error = None;
+                                    } else {
+                                        self.modal = Some(Modal::Result {
+                                            title: command.label().into(),
+                                            text: report.text,
+                                        });
                                     }
-                                });
+                                }
+                                Err(error) => {
+                                    if let Some(panel) = panel.as_mut() {
+                                        panel.report = Some((command, error.clone()));
+                                        panel.entries.clear();
+                                        panel.error = None;
+                                    }
+                                }
+                            }
+                            if let Some(panel) = panel {
+                                self.modal = Some(Modal::GitPanel(panel));
+                            }
                             if command == GitCommand::Fetch {
                                 self.rescan();
+                            }
+                        }
+                        GitEvent::ManagePreviewed(Ok(preview)) => {
+                            self.modal = Some(Modal::GitManagePreview(preview))
+                        }
+                        GitEvent::ManagePreviewed(Err(error)) => {
+                            if let Some(mut panel) = self.manage_return.take() {
+                                panel.error = Some(error);
+                                self.modal = Some(Modal::GitPanel(panel));
+                            } else {
+                                self.modal = Some(Modal::Result {
+                                    title: " GIT ACTION UNAVAILABLE ".into(),
+                                    text: error,
+                                });
                             }
                         }
                         GitEvent::Previewed(Ok(preview)) => {
@@ -715,6 +783,31 @@ impl App {
             self.git_panel_key(key);
             return;
         }
+        if matches!(self.modal, Some(Modal::GitManagePreview(_))) {
+            if key.kind != KeyEventKind::Press {
+                return;
+            }
+            match key.code {
+                KeyCode::Char('y') => {
+                    if let Some(Modal::GitManagePreview(preview)) = self.modal.take() {
+                        self.start_git_job(GitJob::ManageExecute(preview));
+                    }
+                }
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('n' | 'q') => {
+                    self.restore_git_list(false)
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.modal_scroll = self.modal_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.modal_scroll = self.modal_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => self.modal_scroll = self.modal_scroll.saturating_add(10),
+                KeyCode::PageUp => self.modal_scroll = self.modal_scroll.saturating_sub(10),
+                _ => {}
+            }
+            return;
+        }
         if matches!(self.modal, Some(Modal::GitPreview(_))) {
             if key.kind != KeyEventKind::Press {
                 return;
@@ -781,7 +874,13 @@ impl App {
                 }
             } else {
                 match key.code {
-                    KeyCode::Esc | KeyCode::Char('q' | '?') => self.return_to_worktrees(),
+                    KeyCode::Esc | KeyCode::Char('q' | '?') => {
+                        if self.manage_return.is_some() {
+                            self.restore_git_list(true);
+                        } else {
+                            self.return_to_worktrees();
+                        }
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
                         self.modal_scroll = self.modal_scroll.saturating_add(1)
                     }
@@ -1025,6 +1124,14 @@ impl App {
                 preview.action.label().into(),
                 display_name(preview.repository.root.as_os_str()),
             ),
+            GitJob::ManagePreview { path, action } => (
+                format!("Prepare {} preview", action.label()),
+                display_name(path.as_os_str()),
+            ),
+            GitJob::ManageExecute(preview) => (
+                preview.action.label().into(),
+                display_name(preview.repository.root.as_os_str()),
+            ),
             GitJob::WorktreePreview(request) => (
                 format!("Prepare {} preview", request.label()),
                 display_name(request.context().as_os_str()),
@@ -1034,7 +1141,7 @@ impl App {
                 display_name(preview.common_dir.as_os_str()),
             ),
         };
-        if !matches!(&job, GitJob::Report { .. }) {
+        if !matches!(&job, GitJob::Report { .. } | GitJob::InspectRoot(_)) {
             self.git = None;
             self.git_panel_return = None;
         }
@@ -1112,6 +1219,27 @@ impl App {
         self.start_git_job(GitJob::Inspect(directory));
     }
 
+    fn load_git_report(&mut self, command: GitCommand) {
+        if let Some(Modal::GitPanel(mut panel)) = self.modal.take() {
+            let path = panel.repository.root.clone();
+            panel.error = None;
+            self.git_panel_return = Some(panel);
+            self.modal_scroll = 0;
+            self.start_git_job(GitJob::Report { path, command });
+        }
+    }
+
+    fn restore_git_list(&mut self, refresh: bool) {
+        if let Some(panel) = self.manage_return.take() {
+            let command = panel.report.as_ref().map(|r| r.0);
+            self.modal = Some(Modal::GitPanel(panel));
+            self.modal_scroll = 0;
+            if refresh && let Some(command) = command {
+                self.load_git_report(command);
+            }
+        }
+    }
+
     fn git_panel_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -1121,6 +1249,7 @@ impl App {
             && panel.report.is_some()
         {
             panel.report = None;
+            panel.entries.clear();
             self.modal_scroll = 0;
             return;
         }
@@ -1140,6 +1269,85 @@ impl App {
         let Some(Modal::GitPanel(panel)) = self.modal.as_mut() else {
             return;
         };
+        if key.code == KeyCode::Char('t') {
+            if self.scanning.is_some()
+                || self.git_action.is_some()
+                || self.file_task.is_some()
+                || self.deleting.is_some()
+            {
+                panel.error =
+                    Some("Wait for the current operation before opening the shell.".into());
+            } else {
+                self.shell = Some(ShellRequest {
+                    directory: panel.repository.root.clone(),
+                });
+            }
+            return;
+        }
+        if panel.report.as_ref().is_some_and(|(command, _)| {
+            matches!(
+                command,
+                GitCommand::Branches | GitCommand::LocalCommits | GitCommand::Stashes
+            )
+        }) {
+            let delta = match key.code {
+                KeyCode::Up | KeyCode::Char('k') => Some(-1),
+                KeyCode::Down | KeyCode::Char('j') => Some(1),
+                KeyCode::PageUp => Some(-5),
+                KeyCode::PageDown => Some(5),
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                panel.selected = panel
+                    .selected
+                    .saturating_add_signed(delta)
+                    .min(panel.entries.len().saturating_sub(1));
+                return;
+            }
+            if key.code == KeyCode::Home {
+                panel.selected = 0;
+                return;
+            }
+            if key.code == KeyCode::End {
+                panel.selected = panel.entries.len().saturating_sub(1);
+                return;
+            }
+            if key.code == KeyCode::Char('r') {
+                let command = panel.report.as_ref().unwrap().0;
+                self.load_git_report(command);
+                return;
+            }
+            let action = match (panel.entries.get(panel.selected), key.code) {
+                (Some(GitEntry::Branch(branch)), KeyCode::Char('s')) => {
+                    Some(git_manage::Action::Sync(branch.clone()))
+                }
+                (Some(GitEntry::Branch(branch)), KeyCode::Char('d') | KeyCode::Delete) => {
+                    Some(git_manage::Action::DeleteBranch(branch.clone()))
+                }
+                (Some(GitEntry::Stash(stash)), KeyCode::Char('d') | KeyCode::Delete) => {
+                    Some(git_manage::Action::DropStash(stash.clone()))
+                }
+                (Some(GitEntry::Commit { .. }), KeyCode::Char('p')) => panel
+                    .repository
+                    .head
+                    .clone()
+                    .map(git_manage::Action::PushHead),
+                _ => None,
+            };
+            if let Some(action) = action {
+                if self.scanning.is_some() || self.git_action.is_some() {
+                    panel.error =
+                        Some("Wait for the current operation before starting an action.".into());
+                    return;
+                }
+                let path = panel.repository.root.clone();
+                if let Some(Modal::GitPanel(panel)) = self.modal.take() {
+                    self.manage_return = Some(panel);
+                }
+                self.start_git_job(GitJob::ManagePreview { path, action });
+                return;
+            }
+        }
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.modal_scroll = self.modal_scroll.saturating_add(1);
@@ -1169,7 +1377,6 @@ impl App {
         }
         let command = match key.code {
             KeyCode::Char('i') => Some(GitCommand::Status),
-            KeyCode::Char('d') => Some(GitCommand::Diff),
             KeyCode::Char('v') => Some(GitCommand::Branches),
             KeyCode::Char('u') => Some(GitCommand::LocalCommits),
             KeyCode::Char('z') => Some(GitCommand::Stashes),
@@ -1177,14 +1384,7 @@ impl App {
             _ => None,
         };
         if let Some(command) = command {
-            let path = panel.repository.root.clone();
-            if let Some(Modal::GitPanel(mut panel)) = self.modal.take() {
-                panel.error = None;
-                panel.report = None;
-                self.git_panel_return = Some(panel);
-            }
-            self.modal_scroll = 0;
-            self.start_git_job(GitJob::Report { path, command });
+            self.load_git_report(command);
             return;
         }
         if panel.report.is_some() {
