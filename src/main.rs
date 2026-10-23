@@ -1,19 +1,24 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton,
         MouseEventKind,
     },
     execute,
+    style::{Attribute, ResetColor, SetAttribute},
+    terminal::{EnterAlternateScreen, enable_raw_mode},
 };
 use spacewalk::{
     display_name, human_size,
     scan::{self, Options},
+    shell::ShellRequest,
 };
 use std::{
-    io::{self, IsTerminal},
+    io::{self, IsTerminal, Write},
     path::PathBuf,
+    process::ExitStatus,
     sync::atomic::AtomicBool,
     time::Duration,
 };
@@ -132,6 +137,44 @@ fn run_ui(root: PathBuf, options: Options) -> Result<()> {
                 _ => {}
             }
         }
+        if let Some(request) = app.shell.take() {
+            let result = run_shell(&mut terminal, &request)?;
+            app.shell_finished(result);
+            redraw = true;
+        }
     }
     Ok(())
+}
+
+fn run_shell(
+    terminal: &mut ratatui::DefaultTerminal,
+    request: &ShellRequest,
+) -> Result<io::Result<ExitStatus>> {
+    execute!(
+        io::stdout(),
+        DisableMouseCapture,
+        ResetColor,
+        SetAttribute(Attribute::Reset),
+        Show
+    )?;
+    ratatui::try_restore().context("Cannot release the terminal for the shell")?;
+    terminal.show_cursor()?;
+    let result = writeln!(
+        io::stdout(),
+        "\nSpacewalk shell in {}\nType exit to return to Spacewalk; press r there to refresh.\n",
+        display_name(request.directory.as_os_str()),
+    )
+    .and_then(|()| request.run());
+    // Resume even if starting the shell failed, without installing another
+    // panic hook or replacing the application state.
+    enable_raw_mode().context("Cannot restore terminal input after the shell")?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    terminal.hide_cursor()?;
+    terminal.autoresize()?;
+    terminal.clear()?;
+    // Discard buffered input from the shell before accepting app shortcuts.
+    while event::poll(Duration::ZERO)? {
+        let _ = event::read()?;
+    }
+    Ok(result)
 }

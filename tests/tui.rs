@@ -676,3 +676,76 @@ fn hide_uses_h_while_left_arrow_collapses_and_root_cannot_be_marked() {
     app.key(repeat);
     assert_eq!(app.browser.as_ref().unwrap().marked.len(), 1);
 }
+
+#[test]
+fn terminal_binding_uses_the_selected_directory_or_file_parent_and_preserves_marks() {
+    let (dir, mut app) = fixture();
+    let b = app.browser.as_mut().unwrap();
+    let photos = b.data.find_path(&dir.path().join("photos")).unwrap();
+    b.select(photos);
+    key(&mut app, KeyCode::Char('m'));
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(
+        app.shell.take().unwrap().directory,
+        dir.path().join("photos")
+    );
+    assert_eq!(app.browser.as_ref().unwrap().selected, photos);
+    assert!(app.browser.as_ref().unwrap().marked.contains(&photos));
+    let b = app.browser.as_mut().unwrap();
+    let file = b
+        .data
+        .find_path(&dir.path().join("photos/nested/large.jpg"))
+        .unwrap();
+    b.select(file);
+    key(&mut app, KeyCode::Tab);
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(
+        app.shell.take().unwrap().directory,
+        dir.path().join("photos/nested")
+    );
+    assert_eq!(app.browser.as_ref().unwrap().selected, file);
+    app.shell_finished(Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "shell missing",
+    )));
+    assert!(render(&mut app, 120, 42).contains("Terminal unavailable: shell missing"));
+    assert!(app.browser.as_ref().unwrap().marked.contains(&photos));
+    assert!(app.scanning.is_none());
+}
+
+#[test]
+fn terminal_binding_ignores_search_modals_repeats_and_empty_selection() {
+    let (_dir, mut app) = fixture();
+    let mut repeat = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(app.shell.is_none());
+    key(&mut app, KeyCode::Char('?'));
+    key(&mut app, KeyCode::Char('t'));
+    assert!(app.shell.is_none());
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('/'));
+    key(&mut app, KeyCode::Char('t'));
+    assert_eq!(app.browser.as_ref().unwrap().query, "t");
+    assert!(app.shell.is_none());
+    key(&mut app, KeyCode::Esc);
+    app.browser.as_mut().unwrap().filter("no-match".into());
+    key(&mut app, KeyCode::Char('t'));
+    assert!(app.shell.is_none());
+}
+
+#[test]
+fn terminal_waits_for_active_scan_or_deletion() {
+    let (_dir, mut app) = fixture();
+    let (_sender, receiver) = std::sync::mpsc::channel();
+    app.deleting = Some(receiver);
+    key(&mut app, KeyCode::Char('t'));
+    assert!(app.shell.is_none());
+    assert!(app.status.starts_with("Wait for"));
+    app.deleting = None;
+    app.rescan();
+    key(&mut app, KeyCode::Char('t'));
+    assert!(app.shell.is_none());
+    assert!(app.status.starts_with("Wait for"));
+    wait(&mut app);
+}

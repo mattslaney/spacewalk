@@ -91,6 +91,7 @@ spacewalk --help
 | n / N | Next / previous matching name in the current scope |
 | s | Cycle sort: largest, name, file count, smallest |
 | c | Copy the selected item's full path to the system clipboard |
+| t | Open a shell in the selected directory, or the parent of a selected file |
 | r | Rescan the original directory and preserve the current view where possible |
 | h | Hide / show the selected file or directory in the treemap |
 | H | Show all hidden items again |
@@ -105,6 +106,8 @@ Click either panel to focus it and select an item. In the tree, click a director
 Press `c` in either panel to copy the selected item's absolute path, including spaces and Unicode characters, without quotes or a trailing newline. Clipboard copying runs in the background and reports success or unavailability below the selection details. Linux needs `wl-copy` from `wl-clipboard` for Wayland, or `xclip`/`xsel` for X11, with access to the desktop session. macOS uses `pbcopy`; Windows uses PowerShell's `Set-Clipboard`. Clipboard support is optional; navigation continues normally when no clipboard is available.
 
 Completion notices and other temporary action messages clear after three seconds, revealing the selected item's details again.
+
+Press `t` in either panel to open an interactive shell in the current terminal. A selected file or symbolic link opens its parent directory. Unix uses `$SHELL` (falling back to `/bin/sh`); Windows uses `%COMSPEC%` (falling back to `cmd.exe`). Type `exit` to return to the same selection, expanded tree, and deletion marks. Press `r` afterward to refresh disk usage and Git indicators if commands changed anything. Finish the current scan or deletion before opening a shell.
 
 Repository roots have a `⎇` icon in the tree, including linked worktrees, submodules, and bare repositories. Status icons appear alongside it:
 

@@ -5,6 +5,7 @@ use crate::{
     display_name,
     git::{GitTask, RepoState},
     scan::{Identity, Kind, Options, Progress, ScanEvent, ScanTask, Snapshot},
+    shell::ShellRequest,
     treemap::Direction,
 };
 use crossterm::event::{
@@ -13,7 +14,9 @@ use crossterm::event::{
 use ratatui::layout::Rect;
 use std::{
     collections::HashSet,
+    io,
     path::PathBuf,
+    process::ExitStatus,
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
     time::{Duration, Instant},
@@ -143,6 +146,7 @@ pub struct App {
     pub deleting: Option<Receiver<Result<(), String>>>,
     pub copying: Option<Receiver<Result<PathBuf, String>>>,
     pub git: Option<GitTask>,
+    pub shell: Option<ShellRequest>,
     status_expires: Option<Instant>,
     exit_after_delete: bool,
     last_click: Option<(usize, Instant)>,
@@ -167,6 +171,7 @@ impl App {
             deleting: None,
             copying: None,
             git: None,
+            shell: None,
             status_expires: None,
             exit_after_delete: false,
             last_click: None,
@@ -208,6 +213,17 @@ impl App {
             "Ready. Select an item to explore its space usage."
         });
         true
+    }
+
+    pub fn shell_finished(&mut self, result: io::Result<ExitStatus>) {
+        self.last_click = None;
+        self.notify(match result {
+            Ok(status) if status.success() => {
+                "Terminal: returned to Spacewalk. Press r to refresh.".into()
+            }
+            Ok(status) => format!("Terminal: shell exited with {status}. Press r to refresh."),
+            Err(error) => format!("Terminal unavailable: {error}"),
+        });
     }
 
     /// Process worker updates and report whether the screen needs redrawing.
@@ -458,6 +474,13 @@ impl App {
             KeyCode::Char('/') => self.searching = true,
             KeyCode::Esc => b.filter(String::new()),
             KeyCode::Char('s') => b.cycle_sort(),
+            KeyCode::Char('t') if key.kind == KeyEventKind::Press && !b.rows.is_empty() => {
+                if self.scanning.is_some() || self.deleting.is_some() {
+                    self.notify("Wait for the current operation before opening a terminal.");
+                } else if self.shell.is_none() {
+                    self.shell = Some(ShellRequest::new(&b.data, b.selected));
+                }
+            }
             KeyCode::Char('c')
                 if key.kind == KeyEventKind::Press
                     && !b.rows.is_empty()
