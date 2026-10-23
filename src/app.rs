@@ -3,6 +3,9 @@ use crate::{
     clipboard,
     delete::DeleteBatch,
     display_name,
+    files::{
+        self, Directory, FileEvent, FileItem, FileRequest, FileTask, TransferMode, TransferQueue,
+    },
     git::{GitTask, RepoState},
     scan::{Identity, Kind, Options, Progress, ScanEvent, ScanTask, Snapshot},
     shell::ShellRequest,
@@ -28,6 +31,64 @@ pub enum Modal {
     Help,
     Delete(DeleteBatch),
     Errors,
+    FileInput(FileInput),
+    Result { title: String, text: String },
+}
+
+pub enum FileInputKind {
+    Paste { queue: TransferQueue, base: PathBuf },
+    Create { parent: Directory },
+    Rename { item: FileItem, parent: Directory },
+}
+
+pub struct FileInput {
+    pub kind: FileInputKind,
+    pub text: String,
+    pub cursor: usize,
+    pub error: Option<String>,
+}
+
+impl FileInput {
+    pub fn new(kind: FileInputKind, text: String) -> Self {
+        let cursor = text.len();
+        Self {
+            kind,
+            text,
+            cursor,
+            error: None,
+        }
+    }
+    fn request(&self) -> io::Result<FileRequest> {
+        Ok(match &self.kind {
+            FileInputKind::Paste { queue, base } => {
+                let path = PathBuf::from(&self.text);
+                let path = if path.is_absolute() {
+                    path
+                } else {
+                    base.join(path)
+                };
+                FileRequest::Paste {
+                    queue: queue.clone(),
+                    destination: Directory::capture(&path)?,
+                }
+            }
+            FileInputKind::Create { parent } => {
+                files::validate_name(&self.text)?;
+                FileRequest::Create {
+                    parent: parent.clone(),
+                    name: self.text.clone(),
+                }
+            }
+            FileInputKind::Rename { item, parent } => {
+                files::validate_name(&self.text)?;
+                FileRequest::Rename {
+                    item: item.clone(),
+                    parent: parent.clone(),
+                    name: self.text.clone(),
+                }
+            }
+        })
+    }
 }
 
 #[derive(Default)]
@@ -147,6 +208,10 @@ pub struct App {
     pub copying: Option<Receiver<Result<PathBuf, String>>>,
     pub git: Option<GitTask>,
     pub shell: Option<ShellRequest>,
+    pub transfer: Option<TransferQueue>,
+    pub file_task: Option<FileTask>,
+    pub operation_status: String,
+    select_after_scan: Option<PathBuf>,
     status_expires: Option<Instant>,
     exit_after_delete: bool,
     last_click: Option<(usize, Instant)>,
@@ -172,6 +237,10 @@ impl App {
             copying: None,
             git: None,
             shell: None,
+            transfer: None,
+            file_task: None,
+            operation_status: String::new(),
+            select_after_scan: None,
             status_expires: None,
             exit_after_delete: false,
             last_click: None,
@@ -179,7 +248,7 @@ impl App {
     }
 
     pub fn rescan(&mut self) {
-        if self.deleting.is_some() {
+        if self.deleting.is_some() || self.file_task.is_some() {
             return;
         }
         if !self.status.starts_with("Deletion") {
@@ -229,6 +298,54 @@ impl App {
     /// Process worker updates and report whether the screen needs redrawing.
     pub fn poll_workers(&mut self) -> bool {
         let mut changed = false;
+        loop {
+            let event = match self.file_task.as_ref().map(|task| task.receiver.try_recv()) {
+                Some(Ok(event)) => event,
+                Some(Err(TryRecvError::Disconnected)) => FileEvent::Finished(files::FileOutcome {
+                    error: Some("File worker stopped unexpectedly".into()),
+                    ..Default::default()
+                }),
+                _ => break,
+            };
+            changed = true;
+            match event {
+                FileEvent::Progress(text) => self.operation_status = text,
+                FileEvent::Finished(result) => {
+                    self.file_task = None;
+                    if let Some(queue) = self.transfer.as_mut()
+                        && queue.mode == TransferMode::Move
+                    {
+                        queue
+                            .items
+                            .retain(|item| !result.completed.contains(&item.path));
+                        if queue.items.is_empty() {
+                            self.transfer = None;
+                        }
+                    }
+                    self.select_after_scan = result.selected;
+                    let text = if let Some(error) = result.error {
+                        format!(
+                            "{} items completed.\n\n{error}\n\nCompleted items are kept; unfinished cut items remain queued.",
+                            result.completed.len()
+                        )
+                    } else {
+                        "File operation complete. Disk usage refreshed.".into()
+                    };
+                    self.operation_status.clear();
+                    self.modal = Some(Modal::Result {
+                        title: " FILE OPERATION ".into(),
+                        text,
+                    });
+                    self.modal_scroll = 0;
+                    if self.exit_after_delete {
+                        self.quitting = true;
+                    } else {
+                        self.rescan();
+                    }
+                    break;
+                }
+            }
+        }
         let copied = match self.copying.as_ref().map(|receiver| receiver.try_recv()) {
             Some(Ok(result)) => Some(result),
             Some(Err(TryRecvError::Disconnected)) => {
@@ -323,6 +440,11 @@ impl App {
         if let Some(restore) = self.browser.as_ref().map(Restore::capture) {
             b = restore.apply(b);
         }
+        if let Some(path) = self.select_after_scan.take()
+            && let Some(id) = b.data.find_path(&path)
+        {
+            b.select(id);
+        }
         if self.status == "Scanning directory…" {
             self.set_status("Ready. Select an item to explore its space usage.");
         }
@@ -342,7 +464,11 @@ impl App {
     }
 
     fn quit(&mut self) {
-        if self.deleting.is_some() {
+        if let Some(task) = &self.file_task {
+            task.cancel();
+            self.exit_after_delete = true;
+            self.set_status("Finishing file operation before exit…");
+        } else if self.deleting.is_some() {
             self.exit_after_delete = true;
             self.set_status("Finishing deletion before exit…");
         } else {
@@ -356,6 +482,10 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit();
+            return;
+        }
+        if matches!(self.modal, Some(Modal::FileInput(_))) {
+            self.file_input_key(key);
             return;
         }
         if self.modal.is_some() {
@@ -444,6 +574,27 @@ impl App {
             }
             return;
         }
+        if key.kind == KeyEventKind::Press
+            && matches!(key.code, KeyCode::Char('c' | 'x' | 'p' | 'a' | 'R'))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.file_action(key.code);
+            return;
+        }
+        if key.code == KeyCode::Esc && self.transfer.is_some() {
+            self.transfer = None;
+            self.notify("Files: transfer queue cleared");
+            return;
+        }
+        if key.code == KeyCode::F(4)
+            && let Some(task) = &self.file_task
+        {
+            task.cancel();
+            self.operation_status = "Cancelling at a safe boundary…".into();
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => {
                 self.quit();
@@ -475,13 +626,13 @@ impl App {
             KeyCode::Esc => b.filter(String::new()),
             KeyCode::Char('s') => b.cycle_sort(),
             KeyCode::Char('t') if key.kind == KeyEventKind::Press && !b.rows.is_empty() => {
-                if self.scanning.is_some() || self.deleting.is_some() {
+                if self.scanning.is_some() || self.deleting.is_some() || self.file_task.is_some() {
                     self.notify("Wait for the current operation before opening a terminal.");
                 } else if self.shell.is_none() {
                     self.shell = Some(ShellRequest::new(&b.data, b.selected));
                 }
             }
-            KeyCode::Char('c')
+            KeyCode::Char('y')
                 if key.kind == KeyEventKind::Press
                     && !b.rows.is_empty()
                     && self.copying.is_none() =>
@@ -504,10 +655,10 @@ impl App {
                 self.last_click = None;
             }
             KeyCode::Char('m') if key.kind == KeyEventKind::Press && !b.rows.is_empty() => {
-                if self.scanning.is_some() || self.deleting.is_some() {
+                if self.scanning.is_some() || self.deleting.is_some() || self.file_task.is_some() {
                     self.notify("Wait for the current operation before marking items.");
                 } else if b.selected == 0 {
-                    self.notify("The scan root cannot be marked for deletion.");
+                    self.notify("The scan root cannot be marked.");
                 } else {
                     b.toggle_mark(b.selected);
                 }
@@ -542,7 +693,7 @@ impl App {
             KeyCode::PageDown => b.move_tree(self.hits.page_size.max(1) as isize),
             KeyCode::PageUp => b.move_tree(-(self.hits.page_size.max(1) as isize)),
             KeyCode::Char('d') | KeyCode::Delete if key.kind == KeyEventKind::Press => {
-                if self.scanning.is_some() || self.deleting.is_some() {
+                if self.scanning.is_some() || self.deleting.is_some() || self.file_task.is_some() {
                     self.notify("Wait for the current operation before deleting.");
                 } else if !b.marked.is_empty() || !b.rows.is_empty() {
                     let ids = if b.marked.is_empty() {
@@ -588,6 +739,179 @@ impl App {
                 }
             }
             KeyCode::Char(' ') if b.focus == Panel::Tree => b.toggle(b.selected),
+            _ => {}
+        }
+    }
+
+    fn file_action(&mut self, code: KeyCode) {
+        if self.scanning.is_some() || self.deleting.is_some() || self.file_task.is_some() {
+            self.notify("Wait for the current operation before changing files.");
+            return;
+        }
+        let Some(b) = &self.browser else {
+            return;
+        };
+        if b.rows.is_empty() {
+            return;
+        }
+        let result = (|| -> io::Result<Option<FileInput>> {
+            let path = b.data.path(b.selected);
+            let directory = if b.data.nodes[b.selected].kind == Kind::Directory {
+                path.clone()
+            } else {
+                path.parent().unwrap_or(&b.data.root).to_path_buf()
+            };
+            match code {
+                KeyCode::Char('c' | 'x') => {
+                    let ids = if b.marked.is_empty() {
+                        vec![b.selected]
+                    } else {
+                        b.marked.iter().copied().collect()
+                    };
+                    let mode = if code == KeyCode::Char('c') {
+                        TransferMode::Copy
+                    } else {
+                        TransferMode::Move
+                    };
+                    self.transfer = Some(TransferQueue::new(&b.data, ids, mode)?);
+                    Ok(None)
+                }
+                KeyCode::Char('p') => {
+                    let queue = self
+                        .transfer
+                        .clone()
+                        .ok_or_else(|| io::Error::other("Use c to copy or x to cut items first"))?;
+                    let text = directory
+                        .to_str()
+                        .ok_or_else(|| {
+                            io::Error::other("Destination path is not valid Unicode; use the shell")
+                        })?
+                        .to_owned();
+                    Ok(Some(FileInput::new(
+                        FileInputKind::Paste {
+                            queue,
+                            base: directory,
+                        },
+                        text,
+                    )))
+                }
+                KeyCode::Char('a') => Ok(Some(FileInput::new(
+                    FileInputKind::Create {
+                        parent: Directory::capture(&directory)?,
+                    },
+                    String::new(),
+                ))),
+                KeyCode::Char('R') => {
+                    if b.selected == 0 {
+                        return Err(io::Error::other("The scan root cannot be renamed"));
+                    }
+                    let text = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .ok_or_else(|| {
+                            io::Error::other("Name is not valid Unicode; use the shell")
+                        })?
+                        .to_owned();
+                    Ok(Some(FileInput::new(
+                        FileInputKind::Rename {
+                            item: FileItem::from_snapshot(&b.data, b.selected)?,
+                            parent: Directory::capture(path.parent().unwrap())?,
+                        },
+                        text,
+                    )))
+                }
+                _ => Ok(None),
+            }
+        })();
+        match result {
+            Ok(Some(input)) => {
+                self.modal = Some(Modal::FileInput(input));
+                self.modal_scroll = 0;
+            }
+            Ok(None) => self.notify("Files: items queued · navigate then p paste · Esc clear"),
+            Err(error) => self.notify(format!("Files: {error}")),
+        }
+    }
+
+    fn file_input_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.modal = None;
+            return;
+        }
+        let Some(Modal::FileInput(input)) = self.modal.as_mut() else {
+            return;
+        };
+        if key.code == KeyCode::Enter && key.kind == KeyEventKind::Press {
+            match input.request() {
+                Ok(request) => {
+                    self.file_task = Some(FileTask::start(request));
+                    self.git = None;
+                    self.operation_status = "Checking file operation…".into();
+                    self.modal = None;
+                }
+                Err(error) => input.error = Some(error.to_string()),
+            }
+            return;
+        }
+        match key.code {
+            KeyCode::PageDown => self.modal_scroll = self.modal_scroll.saturating_add(5),
+            KeyCode::PageUp => self.modal_scroll = self.modal_scroll.saturating_sub(5),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                input.text.clear();
+                input.cursor = 0;
+            }
+            KeyCode::Char(ch)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                input.text.insert(input.cursor, ch);
+                input.cursor += ch.len_utf8();
+            }
+            KeyCode::Left if input.cursor > 0 => {
+                input.cursor = input.text[..input.cursor]
+                    .char_indices()
+                    .last()
+                    .map_or(0, |(i, _)| i);
+            }
+            KeyCode::Right if input.cursor < input.text.len() => {
+                input.cursor += input.text[input.cursor..]
+                    .chars()
+                    .next()
+                    .unwrap()
+                    .len_utf8();
+            }
+            KeyCode::Home => input.cursor = 0,
+            KeyCode::End => input.cursor = input.text.len(),
+            KeyCode::Backspace if input.cursor > 0 => {
+                let previous = input.text[..input.cursor]
+                    .char_indices()
+                    .last()
+                    .map_or(0, |(i, _)| i);
+                input.text.drain(previous..input.cursor);
+                input.cursor = previous;
+            }
+            KeyCode::Delete if input.cursor < input.text.len() => {
+                let end = input.cursor
+                    + input.text[input.cursor..]
+                        .chars()
+                        .next()
+                        .unwrap()
+                        .len_utf8();
+                input.text.drain(input.cursor..end);
+            }
+            KeyCode::Tab => {
+                if let FileInputKind::Paste { base, .. } = &input.kind {
+                    match files::complete_directory(&input.text, base) {
+                        Ok(text) => {
+                            input.text = text;
+                            input.cursor = input.text.len();
+                            input.error = None;
+                        }
+                        Err(e) => input.error = Some(e.to_string()),
+                    }
+                }
+            }
             _ => {}
         }
     }

@@ -20,7 +20,7 @@ fn key(app: &mut App, code: KeyCode) {
 
 fn wait(app: &mut App) {
     let deadline = Instant::now() + Duration::from_secs(3);
-    while app.scanning.is_some() || app.deleting.is_some() {
+    while app.scanning.is_some() || app.deleting.is_some() || app.file_task.is_some() {
         assert!(
             Instant::now() < deadline,
             "worker timed out: {}",
@@ -287,21 +287,21 @@ fn clipboard_completion_updates_feedback_while_navigation_stays_available() {
 #[test]
 fn copying_requires_a_selection_and_does_not_interfere_with_search_or_modals() {
     let (_dir, mut app) = fixture();
-    let mut repeat = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+    let mut repeat = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
     repeat.kind = crossterm::event::KeyEventKind::Repeat;
     app.key(repeat);
     assert!(app.copying.is_none());
     app.browser.as_mut().unwrap().filter("no-match".into());
-    key(&mut app, KeyCode::Char('c'));
+    key(&mut app, KeyCode::Char('y'));
     assert!(app.copying.is_none());
     key(&mut app, KeyCode::Esc);
     key(&mut app, KeyCode::Char('/'));
-    key(&mut app, KeyCode::Char('c'));
-    assert_eq!(app.browser.as_ref().unwrap().query, "c");
+    key(&mut app, KeyCode::Char('y'));
+    assert_eq!(app.browser.as_ref().unwrap().query, "y");
     assert!(app.copying.is_none());
     key(&mut app, KeyCode::Esc);
     key(&mut app, KeyCode::Char('?'));
-    key(&mut app, KeyCode::Char('c'));
+    key(&mut app, KeyCode::Char('y'));
     assert!(app.copying.is_none());
     app.modal_scroll = 10;
     assert!(render(&mut app, 120, 60).contains("Copy selected path to clipboard"));
@@ -748,4 +748,122 @@ fn terminal_waits_for_active_scan_or_deletion() {
     assert!(app.shell.is_none());
     assert!(app.status.starts_with("Wait for"));
     wait(&mut app);
+}
+
+fn type_text(app: &mut App, text: &str) {
+    for ch in text.chars() {
+        key(app, KeyCode::Char(ch));
+    }
+}
+
+#[test]
+fn file_dialogs_create_rename_copy_and_move_without_using_clipboard() {
+    let (dir, mut app) = fixture();
+    app.browser.as_mut().unwrap().select(0);
+    key(&mut app, KeyCode::Char('a'));
+    type_text(&mut app, "new café");
+    assert!(render(&mut app, 60, 20).contains("NEW FOLDER"));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(dir.path().join("new café").is_dir());
+    assert!(matches!(app.modal, Some(Modal::Result { .. })));
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('R'));
+    app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    type_text(&mut app, "renamed");
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(dir.path().join("renamed").is_dir());
+    key(&mut app, KeyCode::Esc);
+    let file = app
+        .browser
+        .as_ref()
+        .unwrap()
+        .data
+        .find_path(&dir.path().join("notes.txt"))
+        .unwrap();
+    app.browser.as_mut().unwrap().select(file);
+    key(&mut app, KeyCode::Char('c'));
+    assert!(app.copying.is_none());
+    assert!(app.transfer.is_some());
+    let dest = app
+        .browser
+        .as_ref()
+        .unwrap()
+        .data
+        .find_path(&dir.path().join("renamed"))
+        .unwrap();
+    app.browser.as_mut().unwrap().select(dest);
+    key(&mut app, KeyCode::Char('p'));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(dir.path().join("renamed/notes.txt").exists());
+    assert!(app.transfer.is_some());
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Esc);
+    assert!(app.transfer.is_none());
+    key(&mut app, KeyCode::Char('x'));
+    app.browser.as_mut().unwrap().select(0);
+    key(&mut app, KeyCode::Char('p'));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    // The original notes.txt is a collision: neither copy is changed.
+    assert!(dir.path().join("notes.txt").exists());
+    assert!(dir.path().join("renamed/notes.txt").exists());
+    assert!(app.transfer.is_some());
+    assert!(render(&mut app, 120, 42).contains("already exists"));
+}
+
+#[test]
+fn file_actions_route_through_search_and_forms_and_respect_root_and_busy_state() {
+    let (_dir, mut app) = fixture();
+    key(&mut app, KeyCode::Char('/'));
+    type_text(&mut app, "cxyapR");
+    assert_eq!(app.browser.as_ref().unwrap().query, "cxyapR");
+    assert!(app.transfer.is_none());
+    key(&mut app, KeyCode::Esc);
+    app.browser.as_mut().unwrap().select(0);
+    key(&mut app, KeyCode::Char('x'));
+    assert!(app.transfer.is_none());
+    assert!(app.status.contains("root"));
+    key(&mut app, KeyCode::Char('R'));
+    assert!(app.modal.is_none());
+    key(&mut app, KeyCode::Char('a'));
+    type_text(&mut app, "q?y");
+    assert!(matches!(&app.modal, Some(Modal::FileInput(input)) if input.text == "q?y"));
+    key(&mut app, KeyCode::Esc);
+    app.rescan();
+    key(&mut app, KeyCode::Char('a'));
+    assert!(app.modal.is_none());
+    assert!(app.status.starts_with("Wait for"));
+    wait(&mut app);
+}
+
+#[test]
+fn paste_dialog_completes_paths_and_unicode_editing_stays_on_character_boundaries() {
+    let (dir, mut app) = fixture();
+    let file = app
+        .browser
+        .as_ref()
+        .unwrap()
+        .data
+        .find_path(&dir.path().join("notes.txt"))
+        .unwrap();
+    app.browser.as_mut().unwrap().select(file);
+    key(&mut app, KeyCode::Char('c'));
+    key(&mut app, KeyCode::Char('p'));
+    app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    type_text(&mut app, "pho");
+    key(&mut app, KeyCode::Tab);
+    assert!(matches!(&app.modal, Some(Modal::FileInput(input)) if input.text == "photos/"));
+    key(&mut app, KeyCode::Esc);
+    key(&mut app, KeyCode::Char('a'));
+    type_text(&mut app, "aé文");
+    key(&mut app, KeyCode::Left);
+    key(&mut app, KeyCode::Backspace);
+    key(&mut app, KeyCode::Delete);
+    assert!(matches!(&app.modal, Some(Modal::FileInput(input)) if input.text == "a"));
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        let _ = render(&mut app, width, height);
+    }
 }

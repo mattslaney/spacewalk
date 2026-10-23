@@ -90,12 +90,15 @@ spacewalk --help
 | Esc | Clear the filter, cancel deletion, or close a dialog |
 | n / N | Next / previous matching name in the current scope |
 | s | Cycle sort: largest, name, file count, smallest |
-| c | Copy the selected item's full path to the system clipboard |
+| y | Copy the selected item's full path to the system clipboard |
+| c / x / p | Queue items for copy / cut / paste |
+| a / R | Create a folder / rename the selected item |
+| F4 | Cancel a running file operation at a safe boundary |
 | t | Open a shell in the selected directory, or the parent of a selected file |
 | r | Rescan the original directory and preserve the current view where possible |
 | h | Hide / show the selected file or directory in the treemap |
 | H | Show all hidden items again |
-| m / M | Mark or unmark the selected item for deletion / clear all marks |
+| m / M | Mark or unmark the selected item for batch actions / clear all marks |
 | d / Delete | Ask to permanently delete marked items, or the selected item if none are marked |
 | e | Show scan errors |
 | ? / F1 | Open help |
@@ -103,7 +106,28 @@ spacewalk --help
 
 Click either panel to focus it and select an item. In the tree, click a directory's triangle to expand or collapse it. A map click expands the selected file's ancestors and scrolls it into view in the tree. Double-click a block to zoom into its parent directory; right-click the map to zoom out. The wheel over the tree moves its selection. Arrow keys and PageUp/PageDown scroll dialogs.
 
-Press `c` in either panel to copy the selected item's absolute path, including spaces and Unicode characters, without quotes or a trailing newline. Clipboard copying runs in the background and reports success or unavailability below the selection details. Linux needs `wl-copy` from `wl-clipboard` for Wayland, or `xclip`/`xsel` for X11, with access to the desktop session. macOS uses `pbcopy`; Windows uses PowerShell's `Set-Clipboard`. Clipboard support is optional; navigation continues normally when no clipboard is available.
+Press `y` in either panel to copy the selected item's absolute path, including spaces and Unicode characters, without quotes or a trailing newline. Clipboard copying runs in the background and reports success or unavailability below the selection details. Linux needs `wl-copy` from `wl-clipboard` for Wayland, or `xclip`/`xsel` for X11, with access to the desktop session. macOS uses `pbcopy`; Windows uses PowerShell's `Set-Clipboard`. Clipboard support is optional; navigation continues normally when no clipboard is available.
+
+Use `c` or `x` to queue the selected item, or all marked items, for copying or
+moving. Navigate to a destination and press `p`. The paste dialog shows the queued
+items and an editable destination directory; Tab completes an unambiguous directory
+name. Enter confirms and Esc cancels the dialog. Queued transfers are separate from
+the system clipboard. Copy queues can be pasted repeatedly; successfully moved
+items leave the cut queue. Esc outside a dialog clears the transfer queue.
+
+Press `a` to create a folder in the selected directory (or the parent of a selected
+file), or `R` to rename the selected item. Existing destinations are never
+overwritten or merged. Directory copies preserve symbolic links as links, file
+permissions, file modification times, and sparse zero-filled regions. Ownership, ACLs,
+extended attributes, and hard-link relationships are not copied. Moves work across
+filesystems; cross-filesystem moves finish the copy before removing the source.
+The scan root cannot be moved or renamed.
+
+File operations run in the background while navigation remains available. F4
+requests cancellation; completed items are kept and unfinished cut items stay
+queued. The result dialog reports failures and partial completion, and disk usage
+refreshes automatically. Other mutations and shell launches wait until the operation
+finishes. Quitting requests cancellation and waits for the worker to stop safely.
 
 Completion notices and other temporary action messages clear after three seconds, revealing the selected item's details again.
 

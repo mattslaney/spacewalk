@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, HitAreas, Modal},
+    app::{App, FileInputKind, HitAreas, Modal},
     browser::{Browser, Panel},
     display_name,
     git::RepoState,
@@ -135,7 +135,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .split(area);
-    let state = if app.deleting.is_some() {
+    let state = if app.file_task.is_some() {
+        "WORKING"
+    } else if app.deleting.is_some() {
         "DELETING"
     } else if app.scanning.is_some() {
         "SCANNING"
@@ -293,6 +295,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .style(Style::default().fg(WARN)),
             sections[6],
         );
+    } else if app.file_task.is_some() {
+        frame.render_widget(
+            Paragraph::new(format!(
+                " {} · F4 cancel",
+                truncate(
+                    &app.operation_status,
+                    area.width.saturating_sub(15) as usize
+                )
+            ))
+            .style(Style::default().fg(WARN)),
+            sections[6],
+        );
     } else if app.deleting.is_some() {
         frame.render_widget(
             Paragraph::new(app.status.as_str()).style(Style::default().fg(WARN)),
@@ -300,12 +314,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         );
     } else {
         let marked = app.browser.as_ref().map_or(0, |b| b.marked.len());
-        let keys = if marked > 0 {
-            format!(" × {marked} marked · m toggle · M clear · d delete · t shell")
+        let keys = if let Some(queue) = &app.transfer {
+            format!(
+                " {} {} queued · p paste · Esc clear · m mark · ? help",
+                queue.mode.label(),
+                queue.items.len()
+            )
+        } else if marked > 0 {
+            format!(" × {marked} marked · c copy · x cut · d delete · M clear")
         } else if area.width >= 100 {
-            " ↑↓←→ move  Tab panel  t shell  c copy  h hide H all  m mark M clear  d del  / find  s sort  r scan  ? q".into()
+            " ↑↓←→ move  Tab panel  y path  c copy x cut p paste  a mkdir R rename  t shell  m mark  d del  ? help q".into()
         } else {
-            " Arrows Tab t shell h hide H all m mark M clear d del ? q".into()
+            " y path c copy x cut p paste a mkdir R rename t shell ? q".into()
         };
         frame.render_widget(
             Paragraph::new(keys).style(Style::default().fg(MUTED)),
@@ -320,6 +340,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         || app.status.starts_with("Wait for")
         || app.status.starts_with("Clipboard")
         || app.status.starts_with("Terminal")
+        || app.status.starts_with("Files:")
     {
         let status_area = Rect::new(
             sections[5].x,
@@ -644,10 +665,61 @@ fn draw_modal(frame: &mut Frame, app: &App) {
         return;
     };
     let (title, text, warning) = match modal {
+        Modal::Result { title, text } => (
+            title.as_str(),
+            format!("{text}\n\n↑/↓ scroll · Esc closes"),
+            false,
+        ),
+        Modal::FileInput(input) => {
+            let (title, description) = match &input.kind {
+                FileInputKind::Paste { queue, .. } => (
+                    " PASTE ITEMS ",
+                    format!(
+                        "{} {} items into this directory:\n\n{}",
+                        queue.mode.label(),
+                        queue.items.len(),
+                        queue
+                            .items
+                            .iter()
+                            .map(|item| display_name(item.path.as_os_str()))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ),
+                ),
+                FileInputKind::Create { parent } => (
+                    " NEW FOLDER ",
+                    format!(
+                        "Create a folder in {}",
+                        display_name(parent.path.as_os_str())
+                    ),
+                ),
+                FileInputKind::Rename { item, .. } => (
+                    " RENAME ",
+                    format!("Rename {}", display_name(item.path.as_os_str())),
+                ),
+            };
+            let available = area.width.saturating_sub(14).min(72) as usize;
+            let mut before = display_name(std::ffi::OsStr::new(&input.text[..input.cursor]));
+            while before.width() > available.saturating_sub(1) {
+                before.remove(0);
+            }
+            let after = truncate(
+                &display_name(std::ffi::OsStr::new(&input.text[input.cursor..])),
+                available.saturating_sub(before.width() + 1),
+            );
+            let error = input.error.as_deref().unwrap_or("");
+            (
+                title,
+                format!(
+                    "> {before}▏{after}\n{error}\n\nEnter confirms · Esc cancels · Ctrl+U clears\n←/→ Home/End edit · Tab completes paths\nPgUp/PgDn scroll · Existing items are never overwritten\n\n{description}"
+                ),
+                false,
+            )
+        }
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  c                 Copy selected path to clipboard\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle deletion mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nNo network fetch; r rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F4                Cancel running file operation\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nNo network fetch; r rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),
