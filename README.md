@@ -4,24 +4,69 @@ A Rust terminal disk usage explorer inspired by WinDirStat. Browse a file tree a
 
 ![Spacewalk showing a selected directory and its matching blocks](docs/preview.png)
 
-## Run
+## Installation
 
-Requires Rust 1.88 or newer and a terminal with at least 60 columns and 20 rows. A Unicode font and true color support give the best results.
+### From a release
+
+Install the latest published release:
 
 ```sh
-cargo install --path . --locked
+curl -fsSL https://raw.githubusercontent.com/mattslaney/spacewalk/main/install.sh | sh
+```
+
+Prebuilt binaries are available for Linux and macOS on x86_64 and ARM64.
+The installer verifies the download's SHA-256 checksum and installs to
+`~/.local/bin`. No Rust toolchain or root access is required. Run the same
+command again to update.
+
+If needed, add the installation directory to your PATH:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+To download the script separately and choose a version or installation directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mattslaney/spacewalk/main/install.sh -o install-spacewalk.sh
+sh install-spacewalk.sh --version v0.1.0 --install-dir "$HOME/bin"
+```
+
+`SPACEWALK_VERSION` and `SPACEWALK_INSTALL_DIR` also set these options.
+Remove `~/.local/bin/spacewalk` to uninstall the default installation.
+
+You can also download archives and checksums from
+[GitHub Releases](https://github.com/mattslaney/spacewalk/releases). If no release
+is available for your platform, build from source.
+
+### From source
+
+Requires Rust 1.88 or newer:
+
+```sh
+cargo install --git https://github.com/mattslaney/spacewalk.git --locked
+```
+
+Or install from a local checkout:
+
+```sh
+make install                 # Or: cargo install --path . --locked
+```
+
+Cargo installs to `~/.cargo/bin` by default. To use a different prefix, run
+`make install INSTALL_ARGS='--root /path/to/prefix'`; the executable goes in that
+prefix's `bin` directory.
+
+## Usage
+
+Spacewalk needs a terminal with at least 60 columns and 20 rows for its interactive
+interface. A Unicode font and true color support give the best results.
+
+Run `spacewalk` to explore the current directory, or pass a path. Hidden files are
+included.
+
+```sh
 spacewalk ~/Downloads
-```
-
-Or run directly from the checkout:
-
-```sh
-cargo run --release -- /path/to/directory
-```
-
-The directory defaults to the current directory. Hidden files are included.
-
-```sh
 spacewalk . --apparent-size   # Logical lengths rather than allocated blocks
 spacewalk . --summary         # Plain text output, including when piped
 spacewalk --help
@@ -98,15 +143,61 @@ Deletion is **permanent**, including recursive directory deletion. The confirmat
 
 ## Development
 
+Clone the repository and run from the checkout:
+
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
-cargo build --release --locked
+git clone https://github.com/mattslaney/spacewalk.git
+cd spacewalk
+make run ARGS='/path/to/directory'
 ```
+
+Without Make, use `cargo run --release --locked -- /path/to/directory`.
+
+```sh
+make help                    # List common tasks
+make check                   # Formatting, Clippy, Rust/installer tests, release build
+make fmt                     # Apply Rust formatting
+make test                    # Run tests on their own
+make build                   # Build target/release/spacewalk
+make clean                   # Remove build artifacts
+```
+
+`make check` runs the same checks as CI and needs Python 3.8 or newer for the
+offline installer tests. `make fmt-check`, `make lint`, and `make installer-check`
+are also available individually. Cargo commands use the committed lockfile.
 
 The tests exercise scanning, hard links and symlinks, sparse files, treemap coverage and hit testing, keyboard and mouse synchronization, filtering, sorting, view restoration, clipboard handling, Git status, deletion, terminal sizes, and the summary CLI. Git tests use temporary local repositories and remotes; deletion tests operate only on temporary fixtures. The screenshot above is rendered from synthetic data using Ratatui's test backend.
 
 The code separates filesystem scanning (`scan`), navigation state (`browser`), weighted map layout (`treemap`), Git checks (`git`), clipboard copying (`clipboard`), deletion (`delete`), event handling (`app`), and rendering (`ui`). The interface uses [Ratatui](https://docs.rs/ratatui/0.30.2/ratatui/) and [Crossterm](https://docs.rs/crossterm/0.29.0/crossterm/).
 
-Licensed under MIT.
+### Publishing a release
+
+The release workflow builds and tests Linux x86_64/ARM64 and macOS Intel/Apple
+Silicon binaries, then publishes archives and SHA-256 checksums to GitHub Releases.
+Update the version in `Cargo.toml` and run `cargo check` to update `Cargo.lock`.
+Commit and push the changes, then push a matching tag:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+All four builds must succeed before the release is published. Tags containing a
+hyphen are marked as prereleases and are not selected by the default installer.
+The Release workflow can also be run manually to check builds and download
+artifacts without publishing.
+
+## Contributing
+
+Bug reports, feature ideas, and pull requests are welcome. For bug reports,
+include your operating system, Spacewalk version, steps to reproduce, and any
+relevant output. Include your terminal application when reporting display or
+input problems.
+
+Keep pull requests focused, describe the change, and add tests for new behavior
+or bug fixes. Run `make check` before submitting. Screenshots help explain changes
+to the terminal interface.
+
+## License
+
+Spacewalk is licensed under the [MIT License](LICENSE).
