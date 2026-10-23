@@ -234,7 +234,7 @@ cancelled push may need its remote outcome checked in the shell. File mutations,
 rescans, and shell launches wait while a Git job is active. For other Git work,
 close the panel and press `t` to open the shell.
 
-## Worktree inventory
+## Worktree management
 
 Press `w` on a repository or an item inside it, or from the Git action panel, to
 list all its registered worktrees. This includes checkouts outside the scanned
@@ -249,6 +249,31 @@ Use arrows to select, `m`/`M` to mark or clear marks, `y` to copy a path, `t` to
 open a shell, and `r` to refresh. Enter opens the usual Pull, Push, Clean checkout,
 and Reset to remote actions for the selected checkout. Closing those dialogs
 returns to the worktree list with the selection and marks preserved.
+
+Press `d` to remove the selected or marked checkouts. Force starts off; use `f` in
+the removal options to enable it explicitly, then Enter to prepare a preview.
+The preview lists local changes, untracked and ignored content, detached-only
+commits, and reported checkout usage. Only `y` executes; Enter or Esc cancels.
+Associated local branches are kept, including unpushed branches. Force is required
+for local changes and detached commits not retained by branches, tags, or
+remote-tracking references.
+
+Main worktrees, bare hubs, locked worktrees, and checkouts containing Spacewalk's
+scan root or process working directory cannot be removed. Nested repositories and
+submodules are protected even with Force. Registrations and checkout state are
+checked again before removal; partial batches retain unsuccessful selections.
+If Git unregisters a checkout but leaves files behind after an I/O error, its
+leftover path remains marked in the open manager for inspection in the shell.
+Progress and results use the usual floating panels, and the list refreshes when
+you return.
+
+Press `p` for a separate stale-registration prune preview. Pruning removes eligible
+administrative records, not existing checkout folders, branches, or Git objects.
+It honors locks and `gc.worktreePruneExpire` (default `3.months.ago`), so a newly
+missing checkout may still be retained. Pruning also requires `y` confirmation.
+There is no automatic fetching, branch deletion, unlocking, or forced object
+pruning in worktree management. Use Enter for the existing Git actions and their
+separate options.
 
 ## Space accounting and deletion
 

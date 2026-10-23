@@ -1234,3 +1234,173 @@ fn worktree_shortcut_is_contextual_and_available_from_git_panel() {
     assert!(matches!(app.modal, Some(Modal::Worktrees)));
     key(&mut app, KeyCode::Esc);
 }
+
+#[test]
+fn worktree_removal_requires_preview_and_confirmation_and_preserves_branches() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let outside = tempfile::tempdir().unwrap();
+    let linked = outside.path().join("remove-me");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["worktree", "add", "-b", "remove-topic"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    app.rescan();
+    wait(&mut app);
+    app.browser.as_mut().unwrap().select(0);
+    key(&mut app, KeyCode::Char('w'));
+    wait(&mut app);
+    app.worktrees.as_mut().unwrap().selected = linked.clone();
+    key(&mut app, KeyCode::Char('m'));
+    key(&mut app, KeyCode::Char('d'));
+    assert!(matches!(
+        app.modal,
+        Some(Modal::WorktreeRemove { force: false, .. })
+    ));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(matches!(app.modal, Some(Modal::WorktreePreview(_))));
+    assert!(render(&mut app, 60, 20).contains("[y] Execute action"));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(linked.exists());
+    assert!(matches!(app.modal, Some(Modal::Worktrees)));
+    key(&mut app, KeyCode::Char('d'));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    let mut repeat = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(linked.exists());
+    assert!(app.git_action.is_none());
+    key(&mut app, KeyCode::Char('y'));
+    assert!(matches!(app.modal, Some(Modal::Progress)));
+    key(&mut app, KeyCode::Esc);
+    assert!(matches!(app.modal, Some(Modal::Worktrees)));
+    wait(&mut app);
+    assert!(!linked.exists());
+    assert!(matches!(app.modal, Some(Modal::Result { .. })));
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    assert!(matches!(app.modal, Some(Modal::Worktrees)));
+    assert!(!app.worktrees.as_ref().unwrap().marked.contains(&linked));
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["show-ref", "--verify", "refs/heads/remove-topic"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn forced_worktree_removal_is_opt_in_and_active_scan_roots_stay_protected() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let outside = tempfile::tempdir().unwrap();
+    let linked = outside.path().join("dirty");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["worktree", "add", "-b", "dirty-topic"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    fs::write(linked.join("notes.txt"), "local changes").unwrap();
+    app.rescan();
+    wait(&mut app);
+    app.browser.as_mut().unwrap().select(0);
+    key(&mut app, KeyCode::Char('w'));
+    wait(&mut app);
+    app.worktrees.as_mut().unwrap().selected = linked.clone();
+    key(&mut app, KeyCode::Char('d'));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(matches!(&app.modal, Some(Modal::Result { text, .. }) if text.contains("Force")));
+    assert!(linked.exists());
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    key(&mut app, KeyCode::Char('d'));
+    key(&mut app, KeyCode::Char('f'));
+    let mut repeat = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
+    repeat.kind = crossterm::event::KeyEventKind::Repeat;
+    app.key(repeat);
+    assert!(matches!(
+        app.modal,
+        Some(Modal::WorktreeRemove { force: true, .. })
+    ));
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(matches!(app.modal, Some(Modal::WorktreePreview(_))));
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    let mut inside = App::new(linked.clone(), Options::default());
+    wait(&mut inside);
+    key(&mut inside, KeyCode::Char('w'));
+    wait(&mut inside);
+    key(&mut inside, KeyCode::Char('d'));
+    key(&mut inside, KeyCode::Char('f'));
+    key(&mut inside, KeyCode::Enter);
+    wait(&mut inside);
+    assert!(
+        matches!(&inside.modal, Some(Modal::Result { text, .. }) if text.contains("scan root"))
+    );
+    assert!(linked.exists());
+}
+
+#[test]
+fn prune_is_a_separate_previewed_action_and_broken_worktrees_do_not_open_parent_git_panels() {
+    let (dir, mut app) = fixture();
+    init_git_fixture(dir.path());
+    let linked = dir.path().join("nested");
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["worktree", "add", "-b", "nested-topic"])
+            .arg(&linked)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    app.rescan();
+    wait(&mut app);
+    app.browser.as_mut().unwrap().select(0);
+    key(&mut app, KeyCode::Char('w'));
+    wait(&mut app);
+    app.worktrees.as_mut().unwrap().selected = linked.clone();
+    fs::remove_file(linked.join(".git")).unwrap();
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::Result { text, .. }) if text.contains("registered root"))
+    );
+    key(&mut app, KeyCode::Esc);
+    wait(&mut app);
+    key(&mut app, KeyCode::Char('p'));
+    wait(&mut app);
+    assert!(
+        matches!(&app.modal, Some(Modal::WorktreePreview(preview)) if preview.title.contains("Prune"))
+    );
+    for (width, height) in [(60, 20), (120, 42), (30, 10)] {
+        let _ = render(&mut app, width, height);
+    }
+    key(&mut app, KeyCode::Enter);
+    wait(&mut app);
+    assert!(linked.exists());
+}

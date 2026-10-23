@@ -1,3 +1,4 @@
+use spacewalk::worktree_actions::{self, WorktreeRequest};
 use spacewalk::{
     scan::Options,
     worktrees::{self, WorktreeManager, WorktreeRow},
@@ -30,6 +31,17 @@ struct Fixture {
     linked: PathBuf,
 }
 impl Fixture {
+    fn removal(&self, paths: Vec<PathBuf>, force: bool) -> WorktreeRequest {
+        WorktreeRequest::Remove {
+            common_dir: self.main.clone(),
+            paths,
+            force,
+            protected: vec![self.main.clone()],
+            options: Options {
+                apparent_size: true,
+            },
+        }
+    }
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let main = temp.path().join("main");
@@ -239,4 +251,426 @@ fn path_parser_preserves_non_unicode_bytes_and_measurement_does_not_follow_symli
         row.bytes,
         Some(4 + fs::symlink_metadata(f.linked.join("link")).unwrap().len())
     );
+}
+
+#[test]
+fn removes_checkout_and_ignored_output_but_keeps_branch_and_shared_history() {
+    let f = Fixture::new();
+    fs::write(f.main.join(".git/info/exclude"), "target/\n").unwrap();
+    fs::create_dir(f.linked.join("target")).unwrap();
+    fs::write(f.linked.join("target/output"), b"build output").unwrap();
+    let preview = worktree_actions::prepare(
+        f.removal(vec![f.linked.clone()], false),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(preview.text.contains("target/"));
+    assert!(f.linked.is_dir());
+    let result = preview.execute(&AtomicBool::new(false)).unwrap();
+    assert!(result.contains("Removed 1 of 1"));
+    assert!(!f.linked.exists());
+    assert_eq!(git(&f.main, &["branch", "--list", "topic"]).trim(), "topic");
+    assert_eq!(fs::read(f.main.join("data")).unwrap(), b"1234");
+    assert!(f.main.join(".git/objects").is_dir());
+}
+
+#[test]
+fn force_is_required_for_local_changes_and_previews_do_not_show_file_contents() {
+    let f = Fixture::new();
+    fs::write(f.linked.join("data"), "modified").unwrap();
+    fs::write(f.linked.join("untracked"), "untracked bytes").unwrap();
+    fs::write(f.main.join(".git/info/exclude"), ".env\n").unwrap();
+    fs::write(f.linked.join(".env"), "secret fixture contents").unwrap();
+    assert!(
+        worktree_actions::prepare(
+            f.removal(vec![f.linked.clone()], false),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("Force")
+    );
+    let preview = worktree_actions::prepare(
+        f.removal(vec![f.linked.clone()], true),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(preview.text.contains(".env"));
+    assert!(preview.text.contains("untracked"));
+    assert!(!preview.text.contains("secret fixture contents"));
+    assert!(f.linked.exists());
+    preview.execute(&AtomicBool::new(false)).unwrap();
+    assert!(!f.linked.exists());
+}
+
+#[test]
+fn protects_main_locked_active_and_nested_checkouts_even_with_force() {
+    let f = Fixture::new();
+    assert!(
+        worktree_actions::prepare(
+            f.removal(vec![f.main.clone()], true),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("main worktree")
+    );
+    git(
+        &f.main,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "portable drive",
+            f.linked.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        worktree_actions::prepare(
+            f.removal(vec![f.linked.clone()], true),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("locked")
+    );
+    git(&f.main, &["worktree", "unlock", f.linked.to_str().unwrap()]);
+    let protected = f.linked.join("inside");
+    fs::create_dir(&protected).unwrap();
+    let request = WorktreeRequest::Remove {
+        common_dir: f.main.clone(),
+        paths: vec![f.linked.clone()],
+        force: true,
+        protected: vec![protected],
+        options: Options::default(),
+    };
+    assert!(
+        worktree_actions::prepare(request, &AtomicBool::new(false))
+            .unwrap_err()
+            .contains("scan root or working directory")
+    );
+    let nested = f.linked.join("nested");
+    fs::create_dir(&nested).unwrap();
+    git(&nested, &["init", "--initial-branch=main"]);
+    assert!(
+        worktree_actions::prepare(
+            f.removal(vec![f.linked.clone()], true),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("nested repository")
+    );
+    assert!(f.linked.exists());
+}
+
+#[test]
+fn detached_only_commits_need_force_while_referenced_detached_heads_are_removable() {
+    let f = Fixture::new();
+    let detached = f.temp.path().join("detached");
+    git(
+        &f.main,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            detached.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let normal = worktree_actions::prepare(
+        f.removal(vec![detached.clone()], false),
+        &AtomicBool::new(false),
+    );
+    assert!(normal.is_ok());
+    git(
+        &detached,
+        &["commit", "--allow-empty", "-m", "detached-only fixture"],
+    );
+    let oid = git(&detached, &["rev-parse", "HEAD"]);
+    assert!(
+        worktree_actions::prepare(
+            f.removal(vec![detached.clone()], false),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("detached-only")
+    );
+    let preview = worktree_actions::prepare(
+        f.removal(vec![detached.clone()], true),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(preview.text.contains("detached-only fixture"));
+    preview.execute(&AtomicBool::new(false)).unwrap();
+    assert!(!detached.exists());
+    assert_eq!(git(&f.main, &["cat-file", "-t", &oid]), "commit");
+}
+
+#[test]
+fn validates_whole_batches_and_refuses_changes_after_preview() {
+    let f = Fixture::new();
+    let second = f.temp.path().join("second");
+    git(
+        &f.main,
+        &["worktree", "add", "-b", "second", second.to_str().unwrap()],
+    );
+    let paths = vec![f.linked.clone(), second.clone()];
+    let preview =
+        worktree_actions::prepare(f.removal(paths.clone(), false), &AtomicBool::new(false))
+            .unwrap();
+    fs::write(second.join("new"), "arrived after preview").unwrap();
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("changed since preview")
+    );
+    assert!(f.linked.exists());
+    assert!(second.exists());
+    assert!(
+        worktree_actions::prepare(f.removal(paths.clone(), false), &AtomicBool::new(false))
+            .is_err()
+    );
+    fs::remove_file(second.join("new")).unwrap();
+    let preview =
+        worktree_actions::prepare(f.removal(paths, false), &AtomicBool::new(false)).unwrap();
+    preview.execute(&AtomicBool::new(false)).unwrap();
+    assert!(!f.linked.exists());
+    assert!(!second.exists());
+    assert!(!git(&f.main, &["branch", "--list", "topic", "second"]).is_empty());
+}
+
+#[test]
+fn lock_changes_and_cancelled_requests_never_remove_a_checkout() {
+    let f = Fixture::new();
+    let preview = worktree_actions::prepare(
+        f.removal(vec![f.linked.clone()], false),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert!(
+        preview
+            .execute(&AtomicBool::new(true))
+            .unwrap_err()
+            .contains("cancelled")
+    );
+    assert!(f.linked.exists());
+    git(&f.main, &["worktree", "lock", f.linked.to_str().unwrap()]);
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("registrations changed")
+    );
+    assert!(f.linked.exists());
+}
+
+#[test]
+fn prune_uses_configured_expiry_and_keeps_locked_records_and_live_directories() {
+    let f = Fixture::new();
+    let locked = f.temp.path().join("locked");
+    git(
+        &f.main,
+        &["worktree", "add", "-b", "locked", locked.to_str().unwrap()],
+    );
+    git(
+        &f.main,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "offline disk",
+            locked.to_str().unwrap(),
+        ],
+    );
+    fs::remove_dir_all(&f.linked).unwrap();
+    fs::remove_dir_all(&locked).unwrap();
+    git(
+        &f.main,
+        &["config", "gc.worktreePruneExpire", "3.months.ago"],
+    );
+    let request = WorktreeRequest::Prune {
+        common_dir: f.main.clone(),
+    };
+    let preview = worktree_actions::prepare(request.clone(), &AtomicBool::new(false)).unwrap();
+    assert!(preview.text.contains("No records are eligible"));
+    git(&f.main, &["config", "gc.worktreePruneExpire", "now"]);
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("eligibility changed")
+    );
+    let preview = worktree_actions::prepare(request, &AtomicBool::new(false)).unwrap();
+    assert!(preview.text.contains(f.linked.to_str().unwrap()));
+    preview.execute(&AtomicBool::new(false)).unwrap();
+    let registry = worktrees::discover(&f.main, &AtomicBool::new(false)).unwrap();
+    assert!(!registry.records.iter().any(|row| row.path == f.linked));
+    assert!(registry.records.iter().any(|row| row.path == locked));
+    assert!(f.main.join("data").exists());
+    assert_eq!(git(&f.main, &["branch", "--list", "topic"]).trim(), "topic");
+}
+
+#[test]
+fn prune_refuses_changed_registrations_and_broken_checkout_never_targets_parent_repo() {
+    let f = Fixture::new();
+    let preview = worktree_actions::prepare(
+        WorktreeRequest::Prune {
+            common_dir: f.main.clone(),
+        },
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let nested = f.main.join("nested-checkout");
+    git(
+        &f.main,
+        &["worktree", "add", "-b", "nested", nested.to_str().unwrap()],
+    );
+    assert!(
+        preview
+            .execute(&AtomicBool::new(false))
+            .unwrap_err()
+            .contains("registrations changed")
+    );
+    fs::remove_file(nested.join(".git")).unwrap();
+    assert!(
+        worktree_actions::prepare(
+            f.removal(vec![nested.clone()], true),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .contains("registered root")
+    );
+    assert_eq!(fs::read(f.main.join("data")).unwrap(), b"1234");
+    assert!(nested.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn removal_supports_non_unicode_paths() {
+    use std::os::unix::ffi::OsStringExt;
+    let f = Fixture::new();
+    let path = f
+        .temp
+        .path()
+        .join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec()));
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&f.main)
+        .args(["worktree", "add", "-b", "raw"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let preview = worktree_actions::prepare(
+        f.removal(vec![path.clone()], false),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    preview.execute(&AtomicBool::new(false)).unwrap();
+    assert!(!path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reports_partial_batches_and_retains_failed_marks_after_a_filesystem_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let parent = f.temp.path().join("read-only-parent");
+    fs::create_dir(&parent).unwrap();
+    let second = parent.join("second");
+    git(
+        &f.main,
+        &["worktree", "add", "-b", "second", second.to_str().unwrap()],
+    );
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = parent.join("write-probe");
+    if fs::write(&probe, "probe").is_ok() {
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_file(probe).unwrap();
+        return; // Root or an ACL bypasses mode bits; do not claim a simulated I/O failure.
+    }
+    let preview = worktree_actions::prepare(
+        f.removal(vec![f.linked.clone(), second.clone()], false),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let mut manager = WorktreeManager::new(f.linked.clone());
+    manager.apply_registry(worktrees::discover(&f.main, &AtomicBool::new(false)).unwrap());
+    manager.marked.extend([f.linked.clone(), second.clone()]);
+    let result = preview.execute(&AtomicBool::new(false));
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    let error = result.unwrap_err();
+    assert!(error.contains("1 of 2"), "{error}");
+    assert!(!f.linked.exists());
+    assert!(second.exists());
+    manager.apply_registry(worktrees::discover(&f.main, &AtomicBool::new(false)).unwrap());
+    assert!(!manager.marked.contains(&f.linked));
+    assert!(manager.marked.contains(&second));
+}
+
+#[test]
+fn bare_hub_can_remove_a_linked_checkout_and_removal_keeps_symlink_targets() {
+    let f = Fixture::new();
+    let hub = f.temp.path().join("hub.git");
+    git(
+        f.temp.path(),
+        &[
+            "clone",
+            "--bare",
+            f.main.to_str().unwrap(),
+            hub.to_str().unwrap(),
+        ],
+    );
+    let linked = f.temp.path().join("bare-checkout");
+    git(
+        &hub,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "from-bare",
+            linked.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let outside = f.temp.path().join("precious");
+    fs::write(&outside, "keep me").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, linked.join("link")).unwrap();
+    let request = WorktreeRequest::Remove {
+        common_dir: hub.clone(),
+        paths: vec![linked.clone()],
+        force: true,
+        protected: vec![],
+        options: Options::default(),
+    };
+    worktree_actions::prepare(request, &AtomicBool::new(false))
+        .unwrap()
+        .execute(&AtomicBool::new(false))
+        .unwrap();
+    assert!(!linked.exists());
+    assert_eq!(fs::read_to_string(outside).unwrap(), "keep me");
+    assert!(hub.join("objects").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn unavailable_directory_contents_are_reported_as_partial_usage() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let private = f.linked.join("private");
+    fs::create_dir(&private).unwrap();
+    fs::write(private.join("data"), "unreadable").unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o000)).unwrap();
+    let inaccessible = fs::read_dir(&private).is_err();
+    let registry = worktrees::discover(&f.main, &AtomicBool::new(false)).unwrap();
+    let row = worktrees::measure(
+        &registry.records[1],
+        &registry.common_dir,
+        Options::default(),
+        &AtomicBool::new(false),
+    );
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    if inaccessible {
+        assert!(row.scan_errors > 0);
+        assert!(row.bytes.is_some());
+    }
 }

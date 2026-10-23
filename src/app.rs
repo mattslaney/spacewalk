@@ -14,6 +14,7 @@ use crate::{
     scan::{Identity, Kind, Options, Progress, ScanEvent, ScanTask, Snapshot},
     shell::ShellRequest,
     treemap::Direction,
+    worktree_actions::{WorktreePreview, WorktreeRequest},
     worktrees::{WorktreeEvent, WorktreeManager, WorktreeScanTask},
 };
 use crossterm::event::{
@@ -42,6 +43,8 @@ pub enum Modal {
     GitPreview(Box<GitPreview>),
     Progress,
     Worktrees,
+    WorktreeRemove { paths: Vec<PathBuf>, force: bool },
+    WorktreePreview(Box<WorktreePreview>),
 }
 
 pub struct GitPanel {
@@ -411,6 +414,9 @@ impl App {
                         GitEvent::Previewed(Ok(preview)) => {
                             self.modal = Some(Modal::GitPreview(preview))
                         }
+                        GitEvent::WorktreePreviewed(Ok(preview)) => {
+                            self.modal = Some(Modal::WorktreePreview(preview))
+                        }
                         GitEvent::Finished(result) => {
                             self.modal = Some(Modal::Result {
                                 title: " GIT RESULT ".into(),
@@ -418,7 +424,9 @@ impl App {
                             });
                             self.rescan();
                         }
-                        GitEvent::Inspected(Err(error)) | GitEvent::Previewed(Err(error)) => {
+                        GitEvent::Inspected(Err(error))
+                        | GitEvent::Previewed(Err(error))
+                        | GitEvent::WorktreePreviewed(Err(error)) => {
                             self.modal = Some(Modal::Result {
                                 title: " GIT ACTION UNAVAILABLE ".into(),
                                 text: error,
@@ -497,6 +505,9 @@ impl App {
                 Ok(path) => format!("Clipboard: copied {}", display_name(path.as_os_str())),
                 Err(error) => format!("Clipboard unavailable: {error}"),
             });
+            if let Some(manager) = self.worktrees.as_mut() {
+                manager.message = self.status.clone();
+            }
             changed = true;
         }
         loop {
@@ -669,6 +680,13 @@ impl App {
         }
         if matches!(self.modal, Some(Modal::FileInput(_))) {
             self.file_input_key(key);
+            return;
+        }
+        if matches!(
+            self.modal,
+            Some(Modal::WorktreeRemove { .. } | Modal::WorktreePreview(_))
+        ) {
+            self.worktree_action_key(key);
             return;
         }
         if matches!(self.modal, Some(Modal::Worktrees)) {
@@ -986,7 +1004,9 @@ impl App {
     fn start_git_job(&mut self, job: GitJob) {
         self.pause_worktree_scan();
         let (title, context) = match &job {
-            GitJob::Inspect(path) => ("Inspect repository".into(), display_name(path.as_os_str())),
+            GitJob::Inspect(path) | GitJob::InspectCheckout(path) => {
+                ("Inspect repository".into(), display_name(path.as_os_str()))
+            }
             GitJob::Report { path, command } => {
                 (command.label().into(), display_name(path.as_os_str()))
             }
@@ -997,6 +1017,14 @@ impl App {
             GitJob::Execute(preview) => (
                 preview.action.label().into(),
                 display_name(preview.repository.root.as_os_str()),
+            ),
+            GitJob::WorktreePreview(request) => (
+                format!("Prepare {} preview", request.label()),
+                display_name(request.context().as_os_str()),
+            ),
+            GitJob::WorktreeExecute(preview) => (
+                preview.title.clone(),
+                display_name(preview.common_dir.as_os_str()),
             ),
         };
         if !matches!(&job, GitJob::Report { .. }) {
@@ -1239,6 +1267,73 @@ impl App {
         self.modal = Some(Modal::Worktrees);
     }
 
+    fn worktree_action_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('n' | 'q')) {
+            self.return_to_worktrees();
+            return;
+        }
+        if let Some(Modal::WorktreeRemove { force, .. }) = self.modal.as_mut() {
+            if key.code == KeyCode::Char('f') {
+                *force = !*force;
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                let Some(Modal::WorktreeRemove { paths, force }) = self.modal.take() else {
+                    return;
+                };
+                let Some(manager) = &self.worktrees else {
+                    return;
+                };
+                let cwd = match std::env::current_dir() {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.modal = Some(Modal::Result {
+                            title: " WORKTREE ACTION UNAVAILABLE ".into(),
+                            text: format!("Cannot verify process working directory: {error}"),
+                        });
+                        return;
+                    }
+                };
+                let request = WorktreeRequest::Remove {
+                    common_dir: manager.common_dir.clone(),
+                    paths,
+                    force,
+                    protected: vec![self.root.clone(), cwd],
+                    options: self.options,
+                };
+                self.start_git_job(GitJob::WorktreePreview(request));
+                return;
+            }
+        }
+        if matches!(self.modal, Some(Modal::WorktreePreview(_))) {
+            if key.code == KeyCode::Char('y') {
+                if let Some(Modal::WorktreePreview(preview)) = self.modal.take() {
+                    self.start_git_job(GitJob::WorktreeExecute(preview));
+                }
+                return;
+            }
+            if key.code == KeyCode::Enter {
+                self.return_to_worktrees();
+                return;
+            }
+        }
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.modal_scroll = self.modal_scroll.saturating_add(1)
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.modal_scroll = self.modal_scroll.saturating_sub(1)
+            }
+            KeyCode::PageDown => self.modal_scroll = self.modal_scroll.saturating_add(10),
+            KeyCode::PageUp => self.modal_scroll = self.modal_scroll.saturating_sub(10),
+            KeyCode::Home => self.modal_scroll = 0,
+            _ => {}
+        }
+    }
+
     fn worktree_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
@@ -1247,6 +1342,49 @@ impl App {
             self.worktree_scan = None;
             self.worktrees = None;
             self.modal = None;
+            return;
+        }
+        if key.kind == KeyEventKind::Press
+            && matches!(key.code, KeyCode::Char('d' | 'p') | KeyCode::Delete)
+        {
+            let busy = self.scanning.is_some()
+                || self.git_action.is_some()
+                || self.file_task.is_some()
+                || self.deleting.is_some();
+            let Some(manager) = self.worktrees.as_mut() else {
+                return;
+            };
+            if busy {
+                manager.message =
+                    "Wait for the current operation before changing worktrees.".into();
+                return;
+            }
+            if manager.rows.is_empty() {
+                manager.message = "Wait for worktree registrations to load.".into();
+                return;
+            }
+            if key.code == KeyCode::Char('p') {
+                let request = WorktreeRequest::Prune {
+                    common_dir: manager.common_dir.clone(),
+                };
+                self.start_git_job(GitJob::WorktreePreview(request));
+            } else {
+                let paths = if manager.marked.is_empty() {
+                    vec![manager.selected.clone()]
+                } else {
+                    manager
+                        .rows
+                        .iter()
+                        .filter(|row| manager.marked.contains(&row.record.path))
+                        .map(|row| row.record.path.clone())
+                        .collect()
+                };
+                self.modal = Some(Modal::WorktreeRemove {
+                    paths,
+                    force: false,
+                });
+                self.modal_scroll = 0;
+            }
             return;
         }
         let Some(manager) = self.worktrees.as_mut() else {
@@ -1295,13 +1433,16 @@ impl App {
                     return;
                 };
                 let path = row.record.path.clone();
-                if !path.is_dir() || (row.record.bare && key.code == KeyCode::Enter) {
+                if !path.is_dir()
+                    || (key.code == KeyCode::Enter
+                        && (row.record.bare || row.error.is_some() || !row.measured))
+                {
                     manager.message = "Select an available checkout for Git actions; bare hubs only provide the worktree inventory.".into();
                     return;
                 }
                 self.pause_worktree_scan();
                 if key.code == KeyCode::Enter {
-                    self.start_git_job(GitJob::Inspect(path));
+                    self.start_git_job(GitJob::InspectCheckout(path));
                 } else {
                     self.shell = Some(ShellRequest { directory: path });
                 }

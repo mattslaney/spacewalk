@@ -192,6 +192,7 @@ pub struct WorktreeRow {
     pub state: Option<LocalState>,
     pub error: Option<String>,
     pub measured: bool,
+    pub registered: bool,
 }
 impl WorktreeRow {
     pub fn pending(record: WorktreeRecord) -> Self {
@@ -202,6 +203,7 @@ impl WorktreeRow {
             state: None,
             error: None,
             measured: false,
+            registered: true,
         }
     }
 }
@@ -222,7 +224,9 @@ pub fn measure(
         return row;
     }
     let runner = Runner::readonly(cancel);
-    match local_state(&record.path, &runner) {
+    match crate::git_actions::inspect_checkout(&record.path, &runner)
+        .and_then(|_| local_state(&record.path, &runner))
+    {
         Ok(state) => row.state = Some(state),
         Err(error) => row.error = Some(error),
     }
@@ -314,16 +318,36 @@ impl WorktreeManager {
     }
     pub fn apply_registry(&mut self, registry: Registry) {
         self.common_dir = registry.common_dir;
+        let leftovers = self.rows.iter().filter(|row| {
+            let retained = self.marked.contains(&row.record.path) || self.selected == row.record.path;
+            let registered = registry.records.iter().any(|record| record.path == row.record.path);
+            let missing = matches!(std::fs::symlink_metadata(&row.record.path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+            retained && !registered && !missing
+        }).map(|row| {
+            let mut row = row.clone();
+            row.registered = false;
+            row.measured = true;
+            row.bytes = None;
+            row.state = None;
+            row.error = Some("No longer registered with Git; a leftover path remains or could not be inspected. Check it in the shell; branch history is retained.".into());
+            row
+        }).collect::<Vec<_>>();
         self.rows = registry
             .records
             .into_iter()
             .map(WorktreeRow::pending)
             .collect();
+        self.rows.extend(leftovers);
         if !self.rows.iter().any(|row| row.record.path == self.selected) {
             self.selected = self
                 .rows
                 .iter()
-                .find(|row| self.selected.starts_with(&row.record.path))
+                .find(|row| self.marked.contains(&row.record.path))
+                .or_else(|| {
+                    self.rows
+                        .iter()
+                        .find(|row| self.selected.starts_with(&row.record.path))
+                })
                 .or(self.rows.first())
                 .map(|row| row.record.path.clone())
                 .unwrap_or_default();

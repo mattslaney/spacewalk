@@ -673,6 +673,24 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         return;
     }
     let (title, text, warning) = match modal {
+        Modal::WorktreeRemove { paths, force } => (
+            " REMOVE WORKTREES ",
+            format!(
+                "Force removal: [{}] (default off)\n\nf toggles Force · Enter prepares a preview\nEsc cancels · ↑↓ / PgUp/PgDn scroll\n\nSelected checkouts:\n{}\n\nLocal branches are kept. Main, locked, active, and nested checkouts remain protected even with Force.",
+                if *force { "x" } else { " " },
+                paths
+                    .iter()
+                    .map(|path| display_name(path.as_os_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            false,
+        ),
+        Modal::WorktreePreview(preview) => (
+            " CONFIRM WORKTREE ACTION ",
+            format!("{}\n\n{}", preview.title, preview.text),
+            true,
+        ),
         Modal::Progress | Modal::Worktrees => unreachable!(),
         Modal::GitPanel(panel) if panel.report.is_some() => {
             let (command, text) = panel.report.as_ref().unwrap();
@@ -690,7 +708,7 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
             (
                 " GIT ACTIONS ",
                 format!(
-                    "i Status · d Diff · v Branches · u Local commits · z Stashes\nF Fetch remotes and refresh comparisons\nw Worktree inventory\n\np Pull · P Push · c Clean checkout · r Reset to remote\n\nRepository: {}\nBranch: {}\nUpstream: {}\n\nOPTIONS (off by default)\nf [{}] Force Push with lease\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\n\n{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                    "i Status · d Diff · v Branches · u Local commits · z Stashes\nF Fetch remotes and refresh comparisons\nw Worktree manager\n\np Pull · P Push · c Clean checkout · r Reset to remote\n\nRepository: {}\nBranch: {}\nUpstream: {}\n\nOPTIONS (off by default)\nf [{}] Force Push with lease\nl [{}] Clean: discard current branch's local commits\nb [{}] Reset: delete other local branches\ns [{}] Reset: clear repository-wide stashes\n\n{}\nInspection opens immediately. Fetch updates remote refs.\nPull, Push, Clean and Reset open a preview before confirmation.\nPull is fast-forward-only. Clean removes ignored files too.\nOther Git work: Esc, then t for the shell.\n↑/↓ or PgUp/PgDn scroll · Esc closes",
                     display_name(repo.root.as_os_str()),
                     repo.branch.as_deref().unwrap_or("detached"),
                     repo.upstream.as_ref().map_or_else(
@@ -717,7 +735,10 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         ),
         Modal::Result { title, text } => (
             title.as_str(),
-            format!("{text}\n\n↑/↓ scroll · Esc closes"),
+            format!(
+                "{}\n\n↑/↓ scroll · Esc closes",
+                crate::git_actions::visible(text.as_bytes())
+            ),
             false,
         ),
         Modal::FileInput(input) => {
@@ -769,7 +790,7 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         Modal::Help => (
             " KEYBOARD & MOUSE ",
             String::from(
-                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F3                Show / hide operation progress\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git sync and cleanup panel\n  w                 Worktree inventory for this repository\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
+                "NAVIGATION\n  Tab / Shift+Tab   Switch tree / map focus\n  ↑ ↓ ← → / jkl    Tree: move, collapse, expand\n                    Map: move between blocks spatially\n  PgUp / PgDn       Move a page in the tree\n  Home / End, g / G First / last visible tree item\n  Space             Toggle directory in tree\n  Enter             Zoom into selected directory\n                    On a map file: zoom into its parent\n  Backspace         Zoom out one directory\n\nSEARCH & ACTIONS\n  /                 Filter names (case insensitive)\n  Enter / Esc       Apply / clear search\n  n / N             Next / previous matching name\n  s                 Sort: largest, name, files, smallest\n  y                 Copy selected path to clipboard\n  c / x / p         Queue copy / cut / paste\n  a / R             Create folder / rename\n  F3                Show / hide operation progress\n  F4                Cancel running file / Git operation\n  Ctrl+g            Git sync and cleanup panel\n  w                 Worktree manager for this repository\n  t                 Open shell here; exit returns to view\n  r                 Rescan; preserve view where possible\n  h                 Hide / show selected item in the map\n  H                 Show all hidden items\n  m / M             Toggle item mark / clear all marks\n  d / Delete        Delete marked items, or selected item\n  e                 Show scan errors\n  ? / F1            This help\n  q / Ctrl+C        Quit (finishes any deletion first)\n\nMOUSE\n  Click tree row    Select item; click ▸ / ▾ to toggle\n  Click map block   Select and reveal item in the tree\n  Double-click map  Zoom into the block's parent\n  Right-click map   Zoom out\n  Wheel over tree   Move selection up / down\n\nThe tree and map share one selection. A selected directory\nhighlights all its blocks. Colors follow file extensions.\nTiny files can be below terminal resolution; zoom in to see\nthem. Search keeps the map context; h hides a subtree.\nHidden items stay in the tree; H shows everything again.\nMarked rows show ×; d/Delete confirms the marked batch.\nM clears all marks. Enter / Esc cancels confirmation.\n\nGIT ICONS (repository roots only)\n  ⎇ repository   … checking   ✓ clean and synced\n  * changes      ↑ ahead     ↓ behind\n  ∅ no remote    ? unverified / missing upstream\n  ◇ detached     ≡ stash present\nAll local branches are checked against last-fetched refs.\nStatus checks never fetch. Git actions can use the network.\nr rescans and refreshes the checks.\n\n↑/↓ or PgUp/PgDn scroll · Esc closes",
             ),
             false,
         ),
@@ -883,7 +904,7 @@ fn draw_modal(frame: &mut Frame, app: &mut App) {
         inside,
     );
     if warning {
-        let confirmation = if matches!(modal, Modal::GitPreview(_)) {
+        let confirmation = if matches!(modal, Modal::GitPreview(_) | Modal::WorktreePreview(_)) {
             "[y] Execute action   [n / Esc / Enter] Cancel"
         } else {
             "[y] Delete permanently   [n / Esc / Enter] Cancel"
@@ -1067,11 +1088,28 @@ fn draw_worktrees(frame: &mut Frame, app: &App) {
             if row.error.is_some() {
                 flags.push("unavailable");
             }
+            if !row.registered {
+                flags.push("unregistered leftover");
+            }
             if row.scan_errors > 0 {
                 flags.push("partial");
             }
             if row.state.as_ref().is_some_and(|state| state.dirty()) {
                 flags.push("changes");
+            }
+            if row
+                .state
+                .as_ref()
+                .is_some_and(|state| state.ahead.is_some_and(|n| n > 0))
+            {
+                flags.push("ahead");
+            }
+            if row
+                .state
+                .as_ref()
+                .is_some_and(|state| state.behind.is_some_and(|n| n > 0))
+            {
+                flags.push("behind");
             }
             let label = row.record.branch.as_deref().unwrap_or(if row.record.bare {
                 "bare hub"
@@ -1079,7 +1117,11 @@ fn draw_worktrees(frame: &mut Frame, app: &App) {
                 "detached HEAD"
             });
             ListItem::new(vec![
-                Line::from(format!("{mark} {size:>10}  {label}  {}", flags.join(" · "))),
+                Line::from(format!(
+                    "{mark} {size:>10}  {}  {}",
+                    truncate(label, 22),
+                    flags.join(" · ")
+                )),
                 Line::from(Span::styled(
                     format!("   {}", display_name(row.record.path.as_os_str())),
                     Style::default().fg(MUTED),
@@ -1135,7 +1177,7 @@ fn draw_worktrees(frame: &mut Frame, app: &App) {
     let controls = if app.git_action.is_some() {
         "Action running · F3 progress · F4 cancel\n↑↓ select · Esc close"
     } else {
-        "↑↓ select · Enter Git · m mark · M clear · y path\nt shell · r refresh · Esc close"
+        "↑↓ select · Enter Git · m mark · M clear · d remove\np prune · y path · t shell · r refresh · Esc close"
     };
     frame.render_widget(
         Paragraph::new(controls).style(Style::default().fg(ACCENT)),

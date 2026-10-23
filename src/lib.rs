@@ -10,6 +10,7 @@ pub mod scan;
 pub mod shell;
 pub mod treemap;
 pub mod ui;
+pub mod worktree_actions;
 pub mod worktrees;
 
 pub fn human_size(bytes: u64) -> String {

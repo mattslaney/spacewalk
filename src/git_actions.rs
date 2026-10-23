@@ -96,13 +96,30 @@ struct PathState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Fingerprint {
+pub(crate) struct Fingerprint {
     status: Vec<u8>,
     refs: Vec<u8>,
     worktrees: Vec<u8>,
     config: Vec<u8>,
     head: Vec<u8>,
     files: Vec<PathState>,
+}
+
+impl Fingerprint {
+    pub(crate) fn same_checkout(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.refs == other.refs
+            && self.config == other.config
+            && self.head == other.head
+            && self.files == other.files
+    }
+    pub(crate) fn nested_repositories(&self) -> Vec<PathBuf> {
+        self.files
+            .iter()
+            .filter(|entry| entry.nested)
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -124,12 +141,15 @@ pub enum GitJob {
         path: PathBuf,
         command: GitCommand,
     },
+    InspectCheckout(PathBuf),
     Preview {
         path: PathBuf,
         action: GitAction,
         options: GitOptions,
     },
     Execute(Box<GitPreview>),
+    WorktreePreview(crate::worktree_actions::WorktreeRequest),
+    WorktreeExecute(Box<crate::worktree_actions::WorktreePreview>),
 }
 pub enum GitEvent {
     Progress(String),
@@ -140,6 +160,7 @@ pub enum GitEvent {
     },
     Previewed(Result<Box<GitPreview>, String>),
     Finished(Result<String, String>),
+    WorktreePreviewed(Result<Box<crate::worktree_actions::WorktreePreview>, String>),
 }
 pub struct GitActionTask {
     pub receiver: Receiver<GitEvent>,
@@ -163,8 +184,11 @@ impl GitActionTask {
                     command,
                     result: report_with(&path, command, &runner),
                 },
-                GitJob::Preview { path, action, options } => GitEvent::Previewed(prepare_with(&path, action, options, &runner).map(Box::new)),
+                GitJob::InspectCheckout(path) => GitEvent::Inspected(inspect_checkout(&path, &runner)),
+                GitJob::Preview { path, action, options } => GitEvent::Previewed(inspect_checkout(&path, &runner).and_then(|_| prepare_with(&path, action, options, &runner)).map(Box::new)),
                 GitJob::Execute(preview) => GitEvent::Finished(execute_with(&preview, &runner).map_err(|e| format!("{e}\n\nSome steps may have completed. Refresh and review before retrying."))),
+                GitJob::WorktreePreview(request) => GitEvent::WorktreePreviewed(crate::worktree_actions::prepare_with(request, &runner).map(Box::new)),
+                GitJob::WorktreeExecute(preview) => GitEvent::Finished(crate::worktree_actions::execute_with(&preview, &runner)),
             };
             let _ = sender.send(event);
         });
@@ -243,6 +267,16 @@ fn stop_child(child: &mut std::process::Child) {
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
 
 impl Runner<'_> {
+    pub(crate) fn cancel_flag(&self) -> &AtomicBool {
+        self.cancel
+    }
+    pub(crate) fn local(&self) -> Runner<'_> {
+        Runner {
+            cancel: self.cancel,
+            events: self.events,
+            read_only: true,
+        }
+    }
     pub(crate) fn readonly(cancel: &AtomicBool) -> Runner<'_> {
         Runner {
             cancel,
@@ -278,7 +312,12 @@ impl Runner<'_> {
             .as_bytes(),
         ));
         let mut cmd = command(root);
-        if self.read_only || matches!(args.first().and_then(|arg| arg.to_str()), Some("status" | "diff" | "log")) {
+        if self.read_only
+            || matches!(
+                args.first().and_then(|arg| arg.to_str()),
+                Some("status" | "diff" | "log")
+            )
+        {
             cmd.env("GIT_OPTIONAL_LOCKS", "0")
                 .env("GIT_NO_LAZY_FETCH", "1");
         }
@@ -525,6 +564,15 @@ fn inspect_with(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> 
     })
 }
 
+pub(crate) fn inspect_checkout(path: &Path, runner: &Runner<'_>) -> Result<Repository, String> {
+    let repo = inspect_with(path, runner)?;
+    let expected = path.canonicalize().map_err(|e| e.to_string())?;
+    if repo.root != expected {
+        return Err("The selected checkout no longer matches its registered root; refresh or repair it in the shell".into());
+    }
+    Ok(repo)
+}
+
 pub fn inspect(path: &Path, cancel: &AtomicBool) -> Result<Repository, String> {
     inspect_with(
         path,
@@ -561,6 +609,7 @@ pub fn report(path: &Path, command: GitCommand, cancel: &AtomicBool) -> Result<S
         &Runner {
             cancel,
             events: None,
+            read_only: false,
         },
     )
 }
@@ -663,7 +712,7 @@ fn report_with(path: &Path, command: GitCommand, runner: &Runner<'_>) -> Result<
     Ok(text)
 }
 
-fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprint, String> {
+pub(crate) fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprint, String> {
     let status = runner.run(
         root,
         &[
@@ -693,7 +742,7 @@ fn fingerprint(root: &Path, runner: &Runner<'_>) -> Result<Fingerprint, String> 
         let entry_kind = kind(&meta);
         let nested = entry_kind == Kind::Directory
             && path != root
-            && (path.join(".git").exists()
+            && (fs::symlink_metadata(path.join(".git")).is_ok()
                 || (path.join("HEAD").is_file()
                     && path.join("objects").is_dir()
                     && path.join("refs").is_dir()));
@@ -1085,6 +1134,7 @@ impl GitPreview {
 fn execute_with(preview: &GitPreview, runner: &Runner<'_>) -> Result<String, String> {
     preview.anchor.validate().map_err(|e| e.to_string())?;
     let root = &preview.repository.root;
+    inspect_checkout(root, runner)?;
     if fingerprint(root, runner)? != preview.fingerprint {
         return Err("Repository changed since preview. Open the action again for a fresh preview; nothing was executed.".into());
     }
